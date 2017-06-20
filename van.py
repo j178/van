@@ -365,8 +365,7 @@ class Fan(User):
 
         class OAuthTokenHandler(BaseHTTPRequestHandler):
             def do_GET(self):
-                nonlocal
-                callback_request
+                nonlocal callback_request
                 if 'callback?oauth_token=' in self.path:
                     callback_request = self.path
                     self.send_response(200)
@@ -381,8 +380,7 @@ class Fan(User):
                     raise AuthFailed
 
         def start_oauth_server(redirect_uri):
-            nonlocal
-            callback_request
+            nonlocal callback_request
             netloc = urlparse(redirect_uri).netloc
             hostname, port = netloc.split(':')
             try:

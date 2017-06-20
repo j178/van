@@ -1,4 +1,4 @@
-from . import van
+import van
 from setuptools import setup
 
 setup(
