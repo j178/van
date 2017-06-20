@@ -137,7 +137,7 @@ class User(Base):
         statuses = self._get('statuses/user_timeline', id=self.id,
                              since_id=since_id, max_id=max_id, count=count)
         if statuses is not None:
-            return [Status(owner=self, buffer=s) for s in statuses]
+            return Timeline(self, statuses)
 
     def timeline(self, since_id=None, max_id=None, count=None):
         """
@@ -146,7 +146,7 @@ class User(Base):
         # since_id, max_id, count
         timeline = self._get('statuses/home_timeline', id=self.id)
         if timeline is not None:
-            return Timeline(timeline)
+            return Timeline(self, timeline)
 
     def followers(self, count=100):
         """
@@ -155,7 +155,7 @@ class User(Base):
         # count=100
         followers = self._get('statuses/followers', id=self.id, count=count)
         if followers is not None:
-            return [(User(buffer=f) for f in followers)]
+            return [User(buffer=f) for f in followers]
 
     def followers_id(self, count=None):
         """返回此用户关注者的id列表"""
@@ -184,13 +184,13 @@ class User(Base):
         photos = self._get('photos/user_timeline', id=self.id,
                            since_id=since_id, max_id=max_id, count=count)
         if photos is not None:
-            return Timeline(photos)
+            return Timeline(self, photos)
 
-    def favorites(self):
+    def favorites(self, count=None):
         """浏览此用户收藏的消息"""
-        favorites = self._get('favorites/id', id=self.id)
+        favorites = self._get('favorites/id', id=self.id, count=count)
         if favorites is not None:
-            return Timeline(favorites)
+            return Timeline(self, favorites)
 
     def is_friend(self, other):
         """
@@ -268,11 +268,12 @@ class Timeline(list):
 
     """
 
-    def __init__(self, array):
+    def __init__(self, owner, array):
         super(Timeline, self).__init__()
+        self.owner = owner
         self.pos = 0
         self.window_size = 5
-        self.extend(Status(s) for s in array)
+        self.extend(Status(owner, buffer=s) for s in array)
 
     def _fetch(self):
         res = [Status()]
@@ -310,7 +311,7 @@ class Config:
     consumer_secret = None  # required
     auth_type = 'xauth'  # or 'oauth', or offer ``access_token``
     save_token = True  # default True
-    save_path = os.path.join(os.path.expanduser('~'), '.fancache')
+    save_path = os.path.abspath('van.cfg')
     # or you can offer the ``access_token`` directly
     access_token = None
     xauth_username = None
@@ -327,13 +328,32 @@ class Config:
         if self.access_token is not None \
                 and not isinstance(self.access_token, dict):
             raise ValueError('access token should be a dict')
+        self.load()
+
+    def load(self):
+        if self.save_token and os.path.isfile(self.save_path):
+            with open(self.save_path, encoding='utf8') as f:
+                c = json.load(f)
+                self.__dict__.update(c)
 
     def dump(self):
         if self.save_token:
-            print(self)
-            # with open(self.save_path, 'w', encoding='utf8') as f:
-            # todo
-            # json.dump(f, {})
+            attrs = ['consumer_key',
+                     'consumer_secret',
+                     'auth_type',
+                     'save_token',
+                     'save_path',
+                     'access_token',
+                     'xauth_username',
+                     'xauth_password',
+                     'auto_auth',
+                     'redirect_url',
+                     'request_token_url',
+                     'authorize_url',
+                     'access_token_url']
+            with open(self.save_path, 'w', encoding='utf8') as f:
+                config = {x: getattr(self, x) for x in attrs}
+                json.dump(config, f)
 
     def __enter__(self):
         return self
@@ -484,6 +504,9 @@ class Fan(User):
 
     @property
     def id(self):
+        # 主人的id，没有时可以为None而不是发起网络请求，但是如果已经请求了，就使用已有的
+        if self._buffer is not None:
+            return self._buffer.get('id')
         return self._id
 
     def update_status(self, status, photo=None):
@@ -524,16 +547,20 @@ class Fan(User):
         return rs
 
     # 以下是不需要 id 参数，即只能获取当前用户信息的API
-    def replies(self):
+    def replies(self, since_id=None, max_id=None, count=None):
         """返回当前用户收到的回复"""
-        # since_id, max_id, count
         replies = self._get('statuses/replies')
+        if replies is not None:
+            return Timeline(self, replies)
 
-    def mentions(self):
-        """返回回复/提到当前用户的20条消息"""
-        # todo 这个和replies有什么区别？
-        # since_id, max_id, count
+    def mentions(self, since_id=None, max_id=None, count=None):
+        """
+        返回回复/提到当前用户的20条消息
+        warning: 此API好像已被废弃
+        """
         mentions = self._get('statuses/mentions')
+        if mentions is not None:
+            return Timeline(self, mentions)
 
     def follow(self, user):
         """
@@ -543,7 +570,7 @@ class Fan(User):
         if isinstance(user, User):
             user = user.id
         rs = self._post('friendships/create', id=user)
-        return rs['xxx'] == ''
+        return rs
 
     def unfollow(self, user):
         """
@@ -553,7 +580,7 @@ class Fan(User):
         if isinstance(user, User):
             user = user.id
         rs = self._post('friendships/destroy', id=user)
-        return rs['xxx'] == ''
+        return rs
 
     def block(self, user):
         """
@@ -563,7 +590,7 @@ class Fan(User):
         if isinstance(user, User):
             user = user.id
         rs = self._post('blocks/create', id=user)
-        return rs['xxx'] == ''
+        return rs
 
     def unblock(self, user):
         """
@@ -573,7 +600,7 @@ class Fan(User):
         if isinstance(user, User):
             user = user.id
         rs = self._post('blocks/destroy', id=user)
-        return rs['xxx'] == ''
+        return rs
 
     def is_blocked(self, user):
         """
@@ -583,7 +610,7 @@ class Fan(User):
         if isinstance(user, User):
             user = user.id
         rs = self._get('blocks/exists', id=user)
-        return rs['xxx'] == ''
+        return rs
 
     def blocks(self):
         """返回黑名单上用户资料"""
