@@ -12,6 +12,7 @@ import sys
 import time
 from urllib.parse import urlparse
 
+import functools
 import requests
 from requests_oauthlib.oauth1_session import OAuth1Session, TokenRequestDenied
 
@@ -20,13 +21,10 @@ __all__ = ['Fan', 'User', 'Status', 'Timeline', 'Config']
 
 _session = None
 
+logger = logging.getLogger(__name__)
+
 
 class AuthFailed(Exception):
-    def __init__(self, msg):
-        self.msg = msg
-
-
-class ApiRequestError(Exception):
     def __init__(self, msg):
         self.msg = msg
 
@@ -57,13 +55,19 @@ def _request(method, endpoint, **data):
             result = _session.request(method, url, **d, timeout=3)
             j = result.json()
             if result.status_code == 200:
-                return j
-            raise ApiRequestError(j['error'])
+                return True, j
+            logger.error(j['error'])
+            return False, j['error']
         except requests.RequestException as e:
             if failure >= 2:
-                # todo 看看如何处理
-                raise ApiRequestError(str(e))
+                # todo 如何处理
+                raise
         time.sleep(1)
+
+
+_get = functools.partial(_request, method='GET')
+_post = functools.partial(_request, method='POST')
+_file = functools.partial(_request, method='FILE')
 
 
 class Base(object):
@@ -90,33 +94,10 @@ class Base(object):
         # 构造方法保证了此时buffer不为None
         return self._buffer.get('id')
 
-    def _get(self, endpoint, **data):
-        try:
-            rs = _request('GET', endpoint, **data)
-            return rs
-        except ApiRequestError as e:
-            logging.error(e)
-            return None
-
-    def _post(self, endpoint, **data):
-        try:
-            rs = _request('POST', endpoint, **data)
-            return rs
-        except ApiRequestError as e:
-            logging.error(e)
-            return None
-
-    def _file(self, endpoint, **data):
-        try:
-            rs = _request('FILE', endpoint, **data)
-            return rs
-        except ApiRequestError as e:
-            logging.error(e)
-            return None
-
     def _load(self):
-        rs = self._get(self.endpiont, id=self._id)
-        return rs
+        _, rs = _get(self.endpiont, id=self._id)
+        if _:
+            return rs
 
     def __getattr__(self, item):
         if self._buffer is None:
@@ -134,9 +115,9 @@ class User(Base):
     def statuses(self, since_id=None, max_id=None, count=None):
         """返回此用户已发送的消息"""
         # since_id, max_id, count
-        statuses = self._get('statuses/user_timeline', id=self.id,
-                             since_id=since_id, max_id=max_id, count=count)
-        if statuses is not None:
+        _, statuses = _get('statuses/user_timeline', id=self.id,
+                           since_id=since_id, max_id=max_id, count=count)
+        if _:
             return Timeline(self, statuses)
 
     def timeline(self, since_id=None, max_id=None, count=None):
@@ -144,8 +125,8 @@ class User(Base):
         返回此**看到的**时间线
         此用户为当前用户的关注对象或未设置隐私"""
         # since_id, max_id, count
-        timeline = self._get('statuses/home_timeline', id=self.id)
-        if timeline is not None:
+        _, timeline = _get('statuses/home_timeline', id=self.id)
+        if _:
             return Timeline(self, timeline)
 
     def followers(self, count=100):
@@ -153,43 +134,45 @@ class User(Base):
         返回此用户的关注者(前100个)
         此用户为当前用户的关注对象或未设置隐私"""
         # count=100
-        followers = self._get('statuses/followers', id=self.id, count=count)
-        if followers is not None:
+        _, followers = _get('statuses/followers', id=self.id, count=count)
+        if _:
             return [User(buffer=f) for f in followers]
 
     def followers_id(self, count=None):
         """返回此用户关注者的id列表"""
         # count=1..60
-        ids = self._get('followers/ids', id=self.id, count=count)
-        return ids
+        _, ids = _get('followers/ids', id=self.id, count=count)
+        if _:
+            return ids
 
     def friends(self, count=100):
         """
         返回此用户的关注对象(前100个)
         此用户为当前用户的关注对象或未设置隐私"""
         # count=100
-        friends = self._get('statuses/friends', id=self.id, count=count)
-        if friends is not None:
+        _, friends = _get('statuses/friends', id=self.id, count=count)
+        if _:
             return [User(buffer=f) for f in friends]
 
     def friends_id(self, count=None):
         """返回此用户关注对象的id列表"""
         # count=1..60
-        ids = self._get('friends/ids', id=self.id, count=count)
-        return ids
+        _, ids = _get('friends/ids', id=self.id, count=count)
+        if _:
+            return ids
 
     def photos(self, since_id=None, max_id=None, count=None):
         """浏览指定用户的图片"""
         # since_id, max_id, count
-        photos = self._get('photos/user_timeline', id=self.id,
-                           since_id=since_id, max_id=max_id, count=count)
-        if photos is not None:
+        _, photos = _get('photos/user_timeline', id=self.id,
+                         since_id=since_id, max_id=max_id, count=count)
+        if _:
             return Timeline(self, photos)
 
     def favorites(self, count=None):
         """浏览此用户收藏的消息"""
-        favorites = self._get('favorites/id', id=self.id, count=count)
-        if favorites is not None:
+        _, favorites = _get('favorites/id', id=self.id, count=count)
+        if _:
             return Timeline(self, favorites)
 
     def is_friend(self, other):
@@ -199,8 +182,8 @@ class User(Base):
         """
         if isinstance(other, User):
             other = other.id
-        rs = self._get('friendships/show', source_id=self.id, target_id=other)
-        if rs is not None:
+        _, rs = _get('friendships/show', source_id=self.id, target_id=other)
+        if _:
             return rs['relationship']['source']['following']
 
             # def __str__(self):
@@ -236,26 +219,29 @@ class Status(Base):
 
     def delete(self):
         """删除此消息（当前用户发出的消息）"""
-        rs = self._post('statuses/destroy', id=self.id)
+        rs = _post('statuses/destroy', id=self.id)
         return rs['xxx'] == ''
 
     def context(self):
         """按照时间先后顺序显示消息上下文"""
-        rs = self._get('statuses/context_timeline', id=self.id)
-        return rs['xxx'] == ''
+        _, rs = _get('statuses/context_timeline', id=self.id)
+        if _:
+            return
 
     def favorite(self):
         """收藏此消息"""
-        rs = self._post('favorites/create', id=self.id)
-        return rs['xxx'] == ''
+        _, rs = _post('favorites/create', id=self.id)
+        if _:
+            return rs
 
     def unfavorite(self):
         "取消收藏此消息"
-        rs = self._post('favorites/destroy', id=self.id)
-        return rs['xxx'] == ''
+        _, rs = _post('favorites/destroy', id=self.id)
+        if _:
+            return rs
 
-        # def __str__(self):
-        #     return self.text
+            # def __str__(self):
+            #     return self.text
 
 
 class Timeline(list):
@@ -532,25 +518,26 @@ class Fan(User):
 
         p = get_photo(photo)
         if p:
-            rs = self._file('photos/upload', status=status, photo=p)
+            _, rs = _file('photos/upload', status=status, photo=p)
             # 上传文件也可以写成这样：
-            # rs=self._file('photos/upload',
+            # rs=_file('photos/upload',
             # status=(None,status,'text/plain'),
             # photo=('photo',p,''application/octet-stream'')
             p.close()
         else:
-            rs = self._post('statuses/update', status=status)
-        return rs
+            _, rs = _post('statuses/update', status=status)
+        if _:
+            return rs
 
     def delete_status(self, status_id):
-        rs = self._post('statuses/destroy', id=status_id)
+        rs = _post('statuses/destroy', id=status_id)
         return rs
 
     # 以下是不需要 id 参数，即只能获取当前用户信息的API
     def replies(self, since_id=None, max_id=None, count=None):
         """返回当前用户收到的回复"""
-        replies = self._get('statuses/replies')
-        if replies is not None:
+        _, replies = _get('statuses/replies')
+        if _:
             return Timeline(self, replies)
 
     def mentions(self, since_id=None, max_id=None, count=None):
@@ -558,8 +545,8 @@ class Fan(User):
         返回回复/提到当前用户的20条消息
         warning: 此API好像已被废弃
         """
-        mentions = self._get('statuses/mentions')
-        if mentions is not None:
+        _, mentions = _get('statuses/mentions')
+        if _:
             return Timeline(self, mentions)
 
     def follow(self, user):
@@ -569,8 +556,9 @@ class Fan(User):
         """
         if isinstance(user, User):
             user = user.id
-        rs = self._post('friendships/create', id=user)
-        return rs
+        _, rs = _post('friendships/create', id=user)
+        if _:
+            return rs
 
     def unfollow(self, user):
         """
@@ -579,8 +567,9 @@ class Fan(User):
         """
         if isinstance(user, User):
             user = user.id
-        rs = self._post('friendships/destroy', id=user)
-        return rs
+        _, rs = _post('friendships/destroy', id=user)
+        if _:
+            return rs
 
     def block(self, user):
         """
@@ -589,8 +578,9 @@ class Fan(User):
         """
         if isinstance(user, User):
             user = user.id
-        rs = self._post('blocks/create', id=user)
-        return rs
+        _, rs = _post('blocks/create', id=user)
+        if _:
+            return rs
 
     def unblock(self, user):
         """
@@ -599,8 +589,9 @@ class Fan(User):
         """
         if isinstance(user, User):
             user = user.id
-        rs = self._post('blocks/destroy', id=user)
-        return rs
+        _, rs = _post('blocks/destroy', id=user)
+        if _:
+            return rs
 
     def is_blocked(self, user):
         """
@@ -609,16 +600,18 @@ class Fan(User):
         """
         if isinstance(user, User):
             user = user.id
-        rs = self._get('blocks/exists', id=user)
-        return rs
+        _, rs = _get('blocks/exists', id=user)
+        if _:
+            return rs
 
     def blocks(self):
         """返回黑名单上用户资料"""
-        blocks = self._get('blocks/blocking')
-        if blocks is not None:
+        _, blocks = _get('blocks/blocking')
+        if _:
             return [User(b) for b in blocks]
 
     def blocks_id(self):
         """获取用户黑名单id列表"""
-        ids = self._get('blocks/ids')
-        return ids
+        _, ids = _get('blocks/ids')
+        if _:
+            return ids
