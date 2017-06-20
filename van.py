@@ -134,11 +134,12 @@ class User(Base):
     def statuses(self, since_id=None, max_id=None, count=None):
         """返回此用户已发送的消息"""
         # since_id, max_id, count
-        statuses = self._get('statuses/user_timeline', id=self.id, since_id=since_id, max_id=max_id, count=count)
+        statuses = self._get('statuses/user_timeline', id=self.id,
+                             since_id=since_id, max_id=max_id, count=count)
         if statuses is not None:
             return [Status(owner=self, buffer=s) for s in statuses]
 
-    def timeline(self):
+    def timeline(self, since_id=None, max_id=None, count=None):
         """
         返回此**看到的**时间线
         此用户为当前用户的关注对象或未设置隐私"""
@@ -147,40 +148,41 @@ class User(Base):
         if timeline is not None:
             return Timeline(timeline)
 
-    def followers(self):
+    def followers(self, count=100):
         """
         返回此用户的关注者(前100个)
         此用户为当前用户的关注对象或未设置隐私"""
         # count=100
-        followers = self._get('statuses/followers', id=self.id)
+        followers = self._get('statuses/followers', id=self.id, count=count)
         if followers is not None:
             return [(User(buffer=f) for f in followers)]
 
-    def followers_id(self):
+    def followers_id(self, count=None):
         """返回此用户关注者的id列表"""
         # count=1..60
-        ids = self._get('followers/ids', id=self.id)
+        ids = self._get('followers/ids', id=self.id, count=count)
         return ids
 
-    def friends(self):
+    def friends(self, count=100):
         """
         返回此用户的关注对象(前100个)
         此用户为当前用户的关注对象或未设置隐私"""
         # count=100
-        friends = self._get('statuses/friends', id=self.id)
+        friends = self._get('statuses/friends', id=self.id, count=count)
         if friends is not None:
             return [User(buffer=f) for f in friends]
 
-    def friends_id(self):
+    def friends_id(self, count=None):
         """返回此用户关注对象的id列表"""
         # count=1..60
-        ids = self._get('friends/ids', id=self.id)
+        ids = self._get('friends/ids', id=self.id, count=count)
         return ids
 
-    def photos(self):
+    def photos(self, since_id=None, max_id=None, count=None):
         """浏览指定用户的图片"""
         # since_id, max_id, count
-        photos = self._get('photos/user_timeline', id=self.id)
+        photos = self._get('photos/user_timeline', id=self.id,
+                           since_id=since_id, max_id=max_id, count=count)
         if photos is not None:
             return Timeline(photos)
 
@@ -322,7 +324,8 @@ class Config:
 
     def __init__(self):
         atexit.register(self.dump)
-        if self.access_token is not None and not isinstance(self.access_token, dict):
+        if self.access_token is not None \
+                and not isinstance(self.access_token, dict):
             raise ValueError('access token should be a dict')
 
     def dump(self):
@@ -341,6 +344,9 @@ class Config:
 
 class Fan(User):
     def __init__(self, cfg):
+        """
+        :param Config cfg: Config 对象
+        """
         # Fan as a user with access_token, could not offer id
         try:
             super(Fan, self).__init__()
@@ -369,13 +375,15 @@ class Fan(User):
                 if 'callback?oauth_token=' in self.path:
                     callback_request = self.path
                     self.send_response(200)
-                    self.send_header('Content-type', 'text/html; charset=utf-8')
+                    self.send_header('Content-type',
+                                     'text/html; charset=utf-8')
                     self.end_headers()
                     self.wfile.write("<h1>授权成功</h1>".encode('utf8'))
                     self.wfile.write('<p>快去刷饭吧~</p>'.encode('utf8'))
                 else:
                     self.send_response(403)
-                    self.send_header('Content-type', 'text/html; charset=utf-8')
+                    self.send_header('Content-type',
+                                     'text/html; charset=utf-8')
                     self.wfile.write('<h1>参数错误！</h1>'.encode('utf8'))
                     raise AuthFailed
 
@@ -392,7 +400,8 @@ class Fan(User):
                 sys.exit(1)
             httpd = HTTPServer((hostname, port), OAuthTokenHandler)
             sa = httpd.socket.getsockname()
-            serve_message = "[-] 已在本地启动HTTP服务器，等待饭否君的到来 (http://{host}:{port}/) ..."
+            serve_message = "[-] 已在本地启动HTTP服务器，等待饭否君的到来"" \
+            "" (http://{host}:{port}/) ..."
             print(serve_message.format(host=sa[0], port=sa[1]))
             try:
                 httpd.handle_request()
@@ -408,8 +417,9 @@ class Fan(User):
 
         try:
             _session.fetch_request_token(self._cfg.request_token_url)
-            authorization_url = _session.authorization_url(self._cfg.authorize_url,
-                                                           callback_uri=self._cfg.redirect_url)
+            authorization_url = _session.authorization_url(
+                    self._cfg.authorize_url,
+                    callback_uri=self._cfg.redirect_url)
 
             print('[-] 初次使用，此工具需要你的授权才能工作/_\\', 'cyan')
             if get_input('[-] 是否自动在浏览器中打开授权链接(y/n)>') == 'y':
@@ -426,9 +436,12 @@ class Fan(User):
 
             if callback_request:
                 try:
-                    _session.parse_authorization_response(self._cfg.redirect_url + callback_request)
-                    # requests-oauthlib换取access token时verifier是必须的，而饭否在上一步是不返回verifier的，所以必须手动设置
-                    access_token = _session.fetch_access_token(self._cfg.access_token_url, verifier='123')
+                    _session.parse_authorization_response(
+                            self._cfg.redirect_url + callback_request)
+                    # requests-oauthlib换取access token时verifier是必须的，
+                    # 而饭否在上一步是不返回verifier的，所以必须手动设置
+                    access_token = _session.fetch_access_token(
+                            self._cfg.access_token_url, verifier='123')
                 except ValueError:
                     raise AuthFailed
                 return access_token
@@ -446,7 +459,8 @@ class Fan(User):
 
         username = self._cfg.xauth_username or get_input('[-]请输入用户名或邮箱>')
         password = self._cfg.xauth_password or getpass.getpass('[-]请输入密码>')
-        # 这些实际上并不是url params，但是他们与其他url params一样参与签名，最终成为Authorization header的值
+        # 这些实际上并不是url params，但是他们与其他url params一样参与签名，
+        # 最终成为Authorization header的值
         args = [
             ('x_auth_username', username),
             ('x_auth_password', password),
@@ -457,12 +471,15 @@ class Fan(User):
             """Patch oauthlib.oauth1.Client for xauth"""
 
             def get_oauth_params(self, request):
-                params = super(OAuth1ClientPatch, self).get_oauth_params(request)
+                params = super(OAuth1ClientPatch, self).get_oauth_params(
+                        request)
                 params.extend(args)
                 return params
 
-        sess = OAuth1Session(self._cfg.consumer_key, self._cfg.consumer_secret, client_class=OAuth1ClientPatch)
-        access_token = sess.fetch_access_token(self._cfg.access_token_url, verifier='123')
+        sess = OAuth1Session(self._cfg.consumer_key, self._cfg.consumer_secret,
+                             client_class=OAuth1ClientPatch)
+        access_token = sess.fetch_access_token(self._cfg.access_token_url,
+                                               verifier='123')
         return access_token
 
     @property
@@ -480,7 +497,9 @@ class Fan(User):
                     if urlparse(url).scheme != '':
                         resp = requests.get(url)
                         resp.raise_for_status()
-                        if not resp.headers.get('Content-Type', '').lower().startswith('image/'):
+                        if not resp.headers.get('Content-Type',
+                                                '').lower().startswith(
+                                'image/'):
                             return False
                         data = io.BytesIO(resp.content)
                         return data
@@ -492,7 +511,9 @@ class Fan(User):
         if p:
             rs = self._file('photos/upload', status=status, photo=p)
             # 上传文件也可以写成这样：
-            # rs=self._file('photos/upload', status=(None,status,'text/plain'), photo=('photo',p,''application/octet-stream'')
+            # rs=self._file('photos/upload',
+            # status=(None,status,'text/plain'),
+            # photo=('photo',p,''application/octet-stream'')
             p.close()
         else:
             rs = self._post('statuses/update', status=status)

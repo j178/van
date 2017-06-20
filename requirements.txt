@@ -1,2 +1,2 @@
-requests-oauthlib==0.8.0
-arrow==0.10.0
+requests-oauthlib>=0.8.0
+arrow>=0.10.0
