@@ -31,6 +31,6 @@ Example
 
 
     # 2. Instancialize the ``Fan`` class
-    me = Fan(MyConfig())
+    me = Fan.get(MyConfig())
     # 3. call methods of ``me``
     me.update_status('你好啊，李银河！')
