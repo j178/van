@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import time
 from urllib.parse import urlparse
@@ -16,12 +17,12 @@ import functools
 import requests
 from requests_oauthlib.oauth1_session import OAuth1Session, TokenRequestDenied
 
-__version__ = '0.0.1'
+__version__ = '0.0.2'
 __all__ = ['Fan', 'User', 'Status', 'Timeline', 'Config']
 
-_session = None
-
-logger = logging.getLogger(__name__)
+_session = None  # type: OAuth1Session
+_cfg = None  # type: Config
+_logger = logging.getLogger(__name__)
 
 
 class AuthFailed(Exception):
@@ -44,19 +45,18 @@ def _request(method, endpoint, **data):
     # {fieldname: (filename, file_object, content_type, headers)}
     data.setdefault('mode', 'lite')
     data.setdefault('format', 'html')
+    files = data.pop('files', None)
 
     url = 'http://api.fanfou.com/{}.json'.format(endpoint)
-    d = {'params': None, 'data': None, 'files': None}
-    d[{'GET': 'params', 'POST': 'data', 'FILE': 'files'}[method]] = data
-    method = 'POST' if method == 'FILE' else method
+    d = {{'GET': 'params', 'POST': 'data'}[method]: data}
 
     for failure in range(3):
         try:
-            result = _session.request(method, url, **d, timeout=3)
+            result = _session.request(method, url, **d, files=files, timeout=3)
             j = result.json()
             if result.status_code == 200:
                 return True, j
-            logger.error(j['error'])
+            _logger.error(j['error'])
             return False, j['error']
         except requests.RequestException as e:
             if failure >= 2:
@@ -65,9 +65,8 @@ def _request(method, endpoint, **data):
         time.sleep(1)
 
 
-_get = functools.partial(_request, method='GET')
-_post = functools.partial(_request, method='POST')
-_file = functools.partial(_request, method='FILE')
+_get = functools.partial(_request, 'GET')
+_post = functools.partial(_request, 'POST')
 
 
 class Base(object):
@@ -95,13 +94,13 @@ class Base(object):
         return self._buffer.get('id')
 
     def _load(self):
-        _, rs = _get(self.endpiont, id=self._id)
-        if _:
-            return rs
+        return _get(self.endpiont, id=self._id)
 
     def __getattr__(self, item):
         if self._buffer is None:
-            self._buffer = self._load()
+            _, rs = self._load()
+            if _:
+                self._buffer = rs
         return self._buffer.get(item)
 
 
@@ -192,41 +191,85 @@ class User(Base):
 
 class Status(Base):
     endpiont = 'statuses/show'
-    # 避免重复创建 user 对象
-    _user_buffer = {}
+    _user_buffer = {}  # 避免重复创建 user 对象
+
+    _at_re = re.compile(r'@<a.*?>(.*?)</a>', re.I)
+    _topic_re = re.compile(r'#<a.*?>(.*?)</a>#', re.I)
+    _link_re = re.compile(r'<a.*?rel="nofollow" target="_blank">(.*)</a>', re.I)
 
     def __init__(self, owner=None, id=None, buffer=None):
-        if owner:
-            self._owner = self._user_buffer.setdefault(owner.id, owner)
-        if buffer is not None:
-            user = buffer.pop('user', None)
-            if user and not self._owner:
-                user = User(user)
-                self._owner = self._user_buffer.setdefault(user.id, user)
+        self._owner = None
+        if not owner and buffer:
+            owner = User(buffer=buffer['user'])
+        self._owner = self._user_buffer.setdefault(owner.id, owner)
 
         super(Status, self).__init__(id, buffer)
 
+    def _load(self):
+        _, rs = super()._load()
+        # load status 之后更新自己的 user
+        if _:
+            owner = User(buffer=rs['user'])
+            self._owner = self._user_buffer.setdefault(owner.id, owner)
+        return _, rs
+
     @property
     def owner(self):
-        if self._owner is not None:
+        if self._owner:
             return self._owner
-        if self._buffer is None:
-            self._buffer = self._load()
-        user = self._buffer.pop('user')
-        user = User(user)
+        elif not self._buffer:
+            _, rs = self._load()
+            if _:
+                self._buffer = rs
+        user = User(buffer=self._buffer['user'])
         self._owner = self._user_buffer.setdefault(user.id, user)
         return self._owner
 
+    @property
+    def text(self):
+        if not self._buffer:
+            _, rs = self._load()
+            if _:
+                self._buffer = rs
+        text = self._buffer['text']
+        text = self._at_re.sub(r'@\1', text)
+        text = self._topic_re.sub(r'#\1#', text)
+        text = self._link_re.sub(r'\1', text)
+        return text
+
     def delete(self):
         """删除此消息（当前用户发出的消息）"""
-        rs = _post('statuses/destroy', id=self.id)
-        return rs['xxx'] == ''
+        _, rs = _post('statuses/destroy', id=self.id)
+        if _:
+            return rs
 
     def context(self):
         """按照时间先后顺序显示消息上下文"""
         _, rs = _get('statuses/context_timeline', id=self.id)
         if _:
-            return
+            return Timeline(self, rs)
+
+    def reply(self, response, photo=None):
+        """回复这条消息"""
+        response = '@{poster} {resp}'.format(resp=response,
+                                             poster=self.owner.screen_name)
+        _, rv = Fan._update_status(response, photo,
+                                   in_reply_to_user_id=self.owner.id,
+                                   in_reply_to_status_id=self.id)
+        if _:
+            return rv
+
+    def repost(self, repost, photo=None):
+        """转发这条消息"""
+        repost = '{repost}{repost_style_left}@{name} {origin}{repost_style_right}'.format(
+                repost=repost,
+                repost_style_left=_cfg.repost_style_left,
+                name=self.owner.screen_name,
+                origin=self.text,
+                repost_style_right=_cfg.repost_style_right)
+        _, rv = Fan._update_status(repost, photo, repost_status_id=self.id)
+        if _:
+            return rv
 
     def favorite(self):
         """收藏此消息"""
@@ -262,8 +305,9 @@ class Timeline(list):
         self.extend(Status(owner, buffer=s) for s in array)
 
     def _fetch(self):
-        res = [Status()]
-        self.extend(res)
+        # res = [Status()]
+        # self.extend(res)
+        pass
 
     @property
     def window(self):
@@ -304,6 +348,8 @@ class Config:
     xauth_password = None
     auto_auth = True
     redirect_url = 'http://localhost:8000/callback'
+    repost_style_left = ' '
+    repost_style_right = ''
     # API related urls
     request_token_url = 'http://fanfou.com/oauth/request_token'
     authorize_url = 'http://fanfou.com/oauth/authorize'
@@ -359,9 +405,9 @@ class Fan(User):
         except ValueError:
             pass
 
-        global _session
+        global _session, _cfg
 
-        self._cfg = cfg
+        _cfg = self._cfg = cfg
         _session = OAuth1Session(cfg.consumer_key, cfg.consumer_secret)
         if not cfg.access_token:
             if cfg.auth_type == 'oauth':
@@ -495,8 +541,14 @@ class Fan(User):
             return self._buffer.get('id')
         return self._id
 
-    def update_status(self, status, photo=None):
+    @classmethod
+    def _update_status(cls, status, photo=None,
+                       in_reply_to_user_id=None,
+                       in_reply_to_status_id=None,
+                       repost_status_id=None):
         def get_photo(p):
+            if p is None:
+                return False
             if os.path.isfile(p):
                 f = open(p, 'rb')
                 return f
@@ -518,34 +570,43 @@ class Fan(User):
 
         p = get_photo(photo)
         if p:
-            _, rs = _file('photos/upload', status=status, photo=p)
+            rs = _post('photos/upload', status=status, files=dict(photo=p),
+                       in_reply_to_user_id=in_reply_to_user_id,
+                       in_reply_to_status_id=in_reply_to_status_id,
+                       repost_status_id=repost_status_id)
             # 上传文件也可以写成这样：
             # rs=_file('photos/upload',
             # status=(None,status,'text/plain'),
             # photo=('photo',p,''application/octet-stream'')
             p.close()
         else:
-            _, rs = _post('statuses/update', status=status)
+            rs = _post('statuses/update', status=status,
+                       in_reply_to_user_id=in_reply_to_user_id,
+                       in_reply_to_status_id=in_reply_to_status_id,
+                       repost_status_id=repost_status_id)
+
+        return rs
+
+    def update_status(self, status, photo=None):
+        """发表新状态"""
+        _, rs = self._update_status(status, photo)
         if _:
             return rs
-
-    def delete_status(self, status_id):
-        rs = _post('statuses/destroy', id=status_id)
-        return rs
 
     # 以下是不需要 id 参数，即只能获取当前用户信息的API
     def replies(self, since_id=None, max_id=None, count=None):
         """返回当前用户收到的回复"""
-        _, replies = _get('statuses/replies')
+        _, replies = _get('statuses/replies',
+                          since_id=since_id, max_id=max_id, count=count)
         if _:
             return Timeline(self, replies)
 
     def mentions(self, since_id=None, max_id=None, count=None):
         """
         返回回复/提到当前用户的20条消息
-        warning: 此API好像已被废弃
         """
-        _, mentions = _get('statuses/mentions')
+        _, mentions = _get('statuses/mentions',
+                           since_id=since_id, max_id=max_id, count=count)
         if _:
             return Timeline(self, mentions)
 
@@ -608,7 +669,7 @@ class Fan(User):
         """返回黑名单上用户资料"""
         _, blocks = _get('blocks/blocking')
         if _:
-            return [User(b) for b in blocks]
+            return [User(buffer=b) for b in blocks]
 
     def blocks_id(self):
         """获取用户黑名单id列表"""
