@@ -112,12 +112,99 @@ class Base:
             self.init(rv)
 
 
+class Timeline:
+    """
+    需求:
+    1. 完全隐藏网络请求，将此对象看作无尽的数组，随便取数据
+    2. 整合搜索 API
+    3. 提供多种获取方式，id、id区间、时间区间、关键字
+    4. 提供历史记录，可以往回翻页
+    """
+
+    def __init__(self, user, endpoint):
+        self.user = user
+        self.endpoint = endpoint
+        self._pool = []
+        self._max_id = None
+        self._since_id = None
+        self._curr = None
+
+    def __call__(self, since_id=None, max_id=None, count=60):
+        return self._fetch(since_id=since_id, max_id=max_id, count=count)
+
+    def tell(self):
+        return self._curr
+
+    def rewind(self):
+        self._fetch_newer()
+        self.seek(0)
+
+    def seek(self, offset=None, whence=0):
+        """
+
+        :param offset:
+        :param whence:  * 0 -- start of stream (the default); offset should be zero or positive
+                        * 1 -- current stream position; offset may be negative
+                        * 2 -- end of stream; offset is usually negative
+        :return: Return the new absolute position
+        Warning: 此函数不检查索引范围是否合理，请合理使用
+        """
+        if whence == 0:
+            if offset < 0:
+                raise ValueError('offset should be zero or positive')
+            self._curr = min(offset, len(self._pool) - 1)
+        elif whence == 1:
+            # todo
+            self._curr += offset
+        else:
+            if offset > 0:
+                offset = min(offset, self._fetch_older())
+            self._curr += offset
+
+    def read(self, count=10):
+        rv = self[self._curr:self._curr + count]
+        self._curr += count
+        return rv
+
+    def _fetch(self, since_id=None, max_id=None):
+        """
+        返回此**看到的**时间线
+        此用户为当前用户的关注对象或未设置隐私
+        """
+        _, rv = _get(self.endpoint, id=self.user.id,
+                     since_id=since_id, max_id=max_id, count=60)
+        if _:
+            rv = [Status(**s) for s in rv]
+        return _, rv
+
+    def _fetch_older(self):
+        _, rv = self._fetch(max_id=self._since_id)
+        if _ and rv:
+            self._since_id = rv[-1].id
+            self._pool.extend(rv)
+            return len(rv)
+        return 0
+
+    def _fetch_newer(self):
+        _, rv = self._fetch(since_id=self._max_id)
+        if _ and rv:
+            self._max_id = rv[0].id
+            self._pool = rv + self._pool
+            self._curr += len(rv)
+            return len(rv)
+        return 0
+
+    def __next__(self):
+        # todo
+        if self._curr >= len(self._pool):
+            self._fetch_older()
+            return self._pool[-1]
+
+
 class User(Base):
     # 需要 id 参数，可查看其他用户信息的 API 在此类中（也可以省略 id 表示当前用户）
     endpiont = 'users/show'
     _user_buffer = {}  # 每个User只存在一份，这样比较好管理他们的Timeline
-
-    # timeline = Timeline()  # 作为属性描述符
 
     @classmethod
     def get(cls, *args, **kwargs):
@@ -153,6 +240,9 @@ class User(Base):
         :param str created_at: 用户注册时间
         :param int utc_offset: UTC offset
         """
+        self.timeline = Timeline(self, 'statuses/home_timeline')  # 返回此用户看到的时间线
+        self.statues = Timeline(self, 'statuses/user_timeline')  # 返回此用户已发送的消息
+
         self.init(data)
         if fill == _sentinel:
             # only offer id, so fill it
@@ -184,16 +274,6 @@ class User(Base):
         self.utc_offset = data.get('utc_offset')
         self.profile_image_url = data.get('profile_image_url')
         self.profile_image_url_large = data.get('profile_image_url')
-        # self.timeline = Timeline()
-
-    def statuses(self, since_id=None, max_id=None, count=None):
-        """返回此用户已发送的消息"""
-        # since_id, max_id, count
-        _, rv = _get('statuses/user_timeline', id=self.id,
-                     since_id=since_id, max_id=max_id, count=count)
-        if _:
-            rv = [Status(**s) for s in rv]
-        return _, rv
 
     def followers(self, count=100):
         """
@@ -395,52 +475,6 @@ class Status(Base):
         return '<Status ("{}" @{})>'.format(self.text, self.user.id)
 
     __repr__ = __str__
-
-
-class Timeline(list):
-    """
-    需求:
-    1. 完全隐藏网络请求，将此对象看作无尽的数组，随便取数据
-    2. 整合搜索 API
-    3. 提供多种获取方式，id、id区间、时间区间、关键字
-    4. 提供历史记录，可以往回翻页
-    """
-
-    def __init__(self):
-        super(Timeline, self).__init__()
-        self.since_id = None
-        self.max_id = None
-        self.curr_id = None
-
-    def __get__(self, instance, owner):
-        if instance is None:
-            return None
-
-    def _fetch(self):
-        def home_timeline(self, since_id=None, max_id=None, count=None):
-            """
-            返回此**看到的**时间线
-            此用户为当前用户的关注对象或未设置隐私"""
-            # since_id, max_id, count
-
-        _, timeline = _get('statuses/home_timeline', id=self.id,
-                           since_id=since_id, max_id=max_id, count=count)
-
-    def __next__(self):
-        if self.curr_id >= self[-1].rawid:
-            self._fetch()
-            return self[-1]
-
-    def __getitem__(self, item):
-        """
-        支持使用 range 获取区间中的 timeline，如 timeline[date(1,2,3):date(2,3)]
-        :param item:
-        :return:
-        :rtype list[Status]
-        """
-        if isinstance(item, slice):
-            pass
-        return super().__getitem__(item)
 
 
 class Config:
