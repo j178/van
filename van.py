@@ -119,15 +119,18 @@ class Timeline:
     2. 整合搜索 API
     3. 提供多种获取方式，id、id区间、时间区间、关键字
     4. 提供历史记录，可以往回翻页
+    这是技术含量最高的一个类…
     """
 
     def __init__(self, user, endpoint):
         self.user = user
         self.endpoint = endpoint
-        self._pool = []
+        self._pool = []  # type: [Status]
         self._max_id = None
+        self._max_rawid = -1
         self._since_id = None
-        self._curr = None
+        self._since_rawid = 999999999
+        self._curr = 0
 
     def __call__(self, since_id=None, max_id=None, count=60):
         return self._fetch(since_id=since_id, max_id=max_id, count=count)
@@ -136,8 +139,10 @@ class Timeline:
         return self._curr
 
     def rewind(self):
+        """获取最新的状态，并将指针置为0（指向最新的状态）"""
         self._fetch_newer()
-        self.seek(0)
+        self._curr = 0
+        return 0
 
     def seek(self, offset=None, whence=0):
         """
@@ -147,32 +152,44 @@ class Timeline:
                         * 1 -- current stream position; offset may be negative
                         * 2 -- end of stream; offset is usually negative
         :return: Return the new absolute position
-        Warning: 此函数不检查索引范围是否合理，请合理使用
+        Warning: 此函数只能在有限范围检查索引范围，请小心使用
         """
+        if not self._pool:
+            self._fetch_older()
+
         if whence == 0:
             if offset < 0:
                 raise ValueError('offset should be zero or positive')
-            self._curr = min(offset, len(self._pool) - 1)
+            self._curr = min(offset, max(len(self._pool) - 1, 0))
         elif whence == 1:
-            # todo
             self._curr += offset
+            self._curr = min(max(self._curr, 0), len(self._pool))
         else:
             if offset > 0:
-                offset = min(offset, self._fetch_older())
-            self._curr += offset
+                while self._curr + offset >= len(self._pool):
+                    if self._fetch_older() == 0:
+                        break
+                offset = min(offset, len(self._pool))
+            else:
+                offset = max(offset, -len(self._pool))
+            self._curr = len(self._pool) + offset
+        return self._curr
 
     def read(self, count=10):
-        rv = self[self._curr:self._curr + count]
+        while self._curr + count >= len(self._pool):
+            if self._fetch_older() == 0:
+                break
+        rv = self._pool[self._curr:self._curr + count]
         self._curr += count
         return rv
 
-    def _fetch(self, since_id=None, max_id=None):
+    def _fetch(self, since_id=None, max_id=None, count=5):
         """
         返回此**看到的**时间线
         此用户为当前用户的关注对象或未设置隐私
         """
         _, rv = _get(self.endpoint, id=self.user.id,
-                     since_id=since_id, max_id=max_id, count=60)
+                     since_id=since_id, max_id=max_id, count=count)
         if _:
             rv = [Status(**s) for s in rv]
         return _, rv
@@ -181,6 +198,10 @@ class Timeline:
         _, rv = self._fetch(max_id=self._since_id)
         if _ and rv:
             self._since_id = rv[-1].id
+            self._since_rawid = rv[-1].rawid
+            if rv[0].rawid > self._max_rawid:
+                self._max_id = rv[0].id
+                self._max_rawid = rv[0].rawid
             self._pool.extend(rv)
             return len(rv)
         return 0
@@ -189,16 +210,22 @@ class Timeline:
         _, rv = self._fetch(since_id=self._max_id)
         if _ and rv:
             self._max_id = rv[0].id
+            self._max_rawid = rv[0].rawid
+            if rv[0].rawid < self._since_rawid:
+                self._since_id = rv[-1].id
+                self._since_rawid = rv[-1].rawid
             self._pool = rv + self._pool
             self._curr += len(rv)
             return len(rv)
         return 0
 
-    def __next__(self):
-        # todo
-        if self._curr >= len(self._pool):
-            self._fetch_older()
-            return self._pool[-1]
+    def __iter__(self):
+        while True:
+            if self._curr >= len(self._pool):
+                if self._fetch_older() == 0:
+                    raise StopIteration
+            yield self._pool[self._curr]
+            self._curr += 1
 
 
 class User(Base):
