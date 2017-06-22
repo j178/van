@@ -3,7 +3,7 @@ import io
 import time
 import base64
 
-from fanfou_sdk.van import Fan, Config, Status, User
+from van import Fan, Config, Status, User
 
 access_token = {
     "oauth_token": os.environ['ACCESS_TOKEN'],
