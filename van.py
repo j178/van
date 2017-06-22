@@ -4,13 +4,16 @@
 from __future__ import print_function, unicode_literals, absolute_import
 
 import atexit
+import base64
 import io
 import json
 import logging
 import os
+import pickle
 import re
 import sys
 import time
+from collections import namedtuple
 from urllib.parse import urlparse
 
 import functools
@@ -38,7 +41,9 @@ def get_input(prompt=None):
 def get_photo(p):
     if p is None:
         return False
-    if os.path.isfile(p):
+    elif hasattr(p, 'read'):
+        return p
+    elif os.path.isfile(p):
         f = open(p, 'rb')
         return f
     else:
@@ -54,6 +59,9 @@ def get_photo(p):
         except requests.RequestException as e:
             return False
     return False
+
+
+Photo = namedtuple('Photo', ['url', 'largeurl', 'imageurl', 'thumburl', 'originurl', 'type'])
 
 
 def _request(method, endpoint, **data):
@@ -94,21 +102,50 @@ _post = functools.partial(_request, 'POST')
 
 class Base:
     endpiont = None
+    _object_buffer = {}  # 对象缓存
 
-    def __init__(self, id=None, fill=False):
+    def __init__(self, id=None, data=None, **kwargs):
+        # 构造函数的三种使用方式：
+        # 1. User.get(id='') 由id获取对象
+        # 2. User.get(data=rv) 由API返回的字典构造对象
+        # 3. Status(text='abc') 提供一些参数构造一个不完全的对象(一般是没有ID)，API调用之后用返回结果补完
+        # 4. User.get(master=True) 作为主人的特殊待遇
         self.id = id
-        self._filled = False
 
-        if fill and not self._filled:
+        # 对 master 特殊对待
+        if (id and not data and not kwargs) or kwargs.pop('master', None):
             self.fill()
+        elif data:
+            self.init(data)
+        elif kwargs:
+            self.init(kwargs)
+        else:
+            raise ValueError('One of id and data is required')
+
+    @classmethod
+    def get(cls, id=None, data=None, **kwargs):
+        """
+        获取一个对象
+        :param str id: 对象 ID
+        :param dict data: 由字典构造对象
+        :rtype: cls
+        """
+        # make sure every object only has one instance
+        id = id or (data.get('id') if data else id)
+        if id not in cls._object_buffer:
+            o = cls(id=id, data=data, **kwargs)
+            cls._object_buffer[o.id] = o
+            return o
+        return cls._object_buffer[id]
 
     def init(self, data):
+        """用API返回的字典填充此对象"""
         raise NotImplementedError
 
     def fill(self):
+        """调用API填充此对象"""
         _, rv = _get(self.endpiont, id=self.id)
         if _:
-            self._filled = True
             self.init(rv)
 
 
@@ -129,7 +166,7 @@ class Timeline:
         self._max_id = None
         self._max_rawid = -1
         self._since_id = None
-        self._since_rawid = 999999999
+        self._since_rawid = 999999999  # 什么时候饭否消息会达到这个数字呢？
         self._curr = 0
 
     def __call__(self, since_id=None, max_id=None, count=60):
@@ -183,7 +220,7 @@ class Timeline:
         self._curr += count
         return rv
 
-    def _fetch(self, since_id=None, max_id=None, count=5):
+    def _fetch(self, since_id=None, max_id=None, count=60):
         """
         返回此**看到的**时间线
         此用户为当前用户的关注对象或未设置隐私
@@ -191,7 +228,7 @@ class Timeline:
         _, rv = _get(self.endpoint, id=self.user.id,
                      since_id=since_id, max_id=max_id, count=count)
         if _:
-            rv = [Status(**s) for s in rv]
+            rv = [Status.get(data=s) for s in rv]
         return _, rv
 
     def _fetch_older(self):
@@ -231,24 +268,10 @@ class Timeline:
 class User(Base):
     # 需要 id 参数，可查看其他用户信息的 API 在此类中（也可以省略 id 表示当前用户）
     endpiont = 'users/show'
-    _user_buffer = {}  # 每个User只存在一份，这样比较好管理他们的Timeline
+    _object_buffer = {}  # 对象缓存
 
-    @classmethod
-    def get(cls, *args, **kwargs):
+    def __init__(self, id=None, data=None, **kwargs):
         """
-        :rtype: User
-        """
-        # make sure every user only has one instance
-        id = kwargs.get('id')
-        if id not in cls._user_buffer:
-            user = cls(*args, **kwargs, fill=True)
-            cls._user_buffer[user.id] = user
-            return user
-        return cls._user_buffer[id]
-
-    def __init__(self, fill=_sentinel, id=None, **data):
-        """
-        :param bool fill: 是否立即发起请求，填充对象属性。默认为False，当省略该值，并且只提供了id时，fill为True
         :param str id: 用户ID
         :param str name: 用户名字
         :param str screen_name: 用户昵称
@@ -269,15 +292,9 @@ class User(Base):
         """
         self.timeline = Timeline(self, 'statuses/home_timeline')  # 返回此用户看到的时间线
         self.statues = Timeline(self, 'statuses/user_timeline')  # 返回此用户已发送的消息
+        self.photos = Timeline(self, 'photos/user_timeline')  # 浏览指定用户的图片
 
-        self.init(data)
-        if fill == _sentinel:
-            # only offer id, so fill it
-            if id and not any([data.get('name'), data.get('screen_name'), data.get('location')]):
-                fill = True
-            else:
-                fill = False
-        super(User, self).__init__(id, fill)
+        super(User, self).__init__(id, data, **kwargs)
 
     def init(self, data):
         self.id = data.get('id')
@@ -309,7 +326,7 @@ class User(Base):
         # count=100
         _, rv = _get('statuses/followers', id=self.id, count=count)
         if _:
-            rv = [User.get(**f) for f in rv]
+            rv = [User.get(data=f) for f in rv]
         return _, rv
 
     def followers_id(self, count=None):
@@ -324,7 +341,7 @@ class User(Base):
         # count=100
         _, rv = _get('statuses/friends', id=self.id, count=count)
         if _:
-            rv = [User.get(**f) for f in rv]
+            rv = [User.get(data=f) for f in rv]
         return _, rv
 
     def friends_id(self, count=None):
@@ -332,20 +349,11 @@ class User(Base):
         # count=1..60
         return _get('friends/ids', id=self.id, count=count)
 
-    def photos(self, since_id=None, max_id=None, count=None):
-        """浏览指定用户的图片"""
-        # since_id, max_id, count
-        _, rv = _get('photos/user_timeline', id=self.id,
-                     since_id=since_id, max_id=max_id, count=count)
-        if _:
-            rv = [Status(**s) for s in rv]
-        return _, rv
-
     def favorites(self, count=None):
         """浏览此用户收藏的消息"""
         _, rv = _get('favorites/id', id=self.id, count=count)
         if _:
-            rv = [Status(s) for s in rv]
+            rv = [Status.get(data=s) for s in rv]
         return _, rv
 
     def relationship(self, other):
@@ -359,7 +367,7 @@ class User(Base):
         _, rv = _get('friendships/show', source_id=self.id, target_id=other)
         if _:
             source = rv['relationship']['source']
-            rv = (source['blocking'], source['following'], source['followed_by'])
+            rv = (source['blocking'] == 'true', source['following'] == 'true', source['followed_by'] == 'true')
         return _, rv
 
     def __str__(self):
@@ -370,12 +378,13 @@ class User(Base):
 
 class Status(Base):
     endpiont = 'statuses/show'
+    _object_buffer = {}  # 对象缓存
 
     _at_re = re.compile(r'@<a.*?>(.*?)</a>', re.I)
     _topic_re = re.compile(r'#<a.*?>(.*?)</a>#', re.I)
     _link_re = re.compile(r'<a.*?rel="nofollow" target="_blank">(.*)</a>', re.I)
 
-    def __init__(self, fill=_sentinel, id=None, **data):
+    def __init__(self, id=None, data=None, **kwargs):
         """
         :param str text: 消息内容
         :param str id: status id
@@ -384,21 +393,14 @@ class Status(Base):
         :param Status|dict repost_status: 被转发消息的详细信息
         :param User|dict user: 消息的主人
         """
-        self.init(data)
-        if fill == _sentinel:
-            # only offer id, so fill it
-            if id and not any([data.get('text'), data.get('photo'), data.get('created_at')]):
-                fill = True
-            else:
-                fill = False
-        super(Status, self).__init__(id, fill)
+        super(Status, self).__init__(id, data, **kwargs)
 
     def init(self, d):
         self.id = d.get('id')
         self.text = d.get('text')
         self.photo = d.get('photo')
         user = d.get('user')
-        self.user = user if (not user or isinstance(user, User)) else User.get(**user)
+        self.user = user if (not user or isinstance(user, User)) else User.get(data=user)
         self.created_at = d.get('created_at')
         self.in_reply_to_user_id = d.get('in_reply_to_user_id')
         self.in_reply_to_status_id = d.get('in_reply_to_status_id')
@@ -406,7 +408,7 @@ class Status(Base):
         self.repost_status_id = d.get('repost_status_id')
         repost_status = d.get('repost_status')
         self.repost_status = repost_status if (not repost_status or isinstance(repost_status, Status)) \
-            else Status(**repost_status)
+            else Status(data=repost_status)
         self.repost_user_id = d.get('repost_user_id')
         self.repost_screen_name = d.get('repost_screen_name')
         self.favorited = d.get('favorited')
@@ -417,10 +419,14 @@ class Status(Base):
         self.location = d.get('location')
         # process photo dict
         if isinstance(self.photo, dict):
-            originurl = re.sub(r'@.+\..+$', '', self.photo['largeurl'])
+            p = self.photo
+            originurl = re.sub(r'@.+\..+$', '', p['largeurl'])
             type = re.match(r'^.+\.(.+)$', originurl).group(1)
-            self.photo['originurl'] = originurl
-            self.photo['gif'] = (type == 'gif')
+            p['originurl'] = originurl
+            p['type'] = type
+            self.photo = Photo(**p)
+
+        return self
 
     @classmethod
     def process_text(cls, text):
@@ -453,19 +459,25 @@ class Status(Base):
                           in_reply_to_status_id=self.in_reply_to_status_id,
                           repost_status_id=self.repost_status_id)
         if _:
-            rs = Status(**rs)
+            # 用返回的结果补全自己
+            rs = self.init(rs)
+        else:
+            _logger.error('Send faile, saved to draft box, you can send it later')
+            _cfg.draft_box.append(self)
         return _, rs
 
     def delete(self):
         """删除此消息（当前用户发出的消息）"""
-        rs = _post('statuses/destroy', id=self.id)
-        return rs
+        _, rs = _post('statuses/destroy', id=self.id)
+        if _:
+            rs = self.init(rs)
+        return _, rs
 
     def context(self):
         """按照时间先后顺序显示消息上下文"""
         _, rv = _get('statuses/context_timeline', id=self.id)
         if _:
-            rv = [Status(**s) for s in rv]
+            rv = [Status.get(data=s) for s in rv]
         return _, rv
 
     def reply(self, response, photo=None):
@@ -490,13 +502,18 @@ class Status(Base):
 
     def favorite(self):
         """收藏此消息"""
-        rs = _post('favorites/create', id=self.id)
-        return rs
+        # fuck, 为啥就这一个API不一样…
+        _, rs = _post('favorites/create/' + self.id)
+        if _:
+            rs = self.init(rs)
+        return _, rs
 
     def unfavorite(self):
         "取消收藏此消息"
-        rs = _post('favorites/destroy', id=self.id)
-        return rs
+        _, rs = _post('favorites/destroy/' + self.id)
+        if _:
+            rs = self.init(rs)
+        return _, rs
 
     def __str__(self):
         return '<Status ("{}" @{})>'.format(self.text, self.user.id)
@@ -535,6 +552,7 @@ class Config:
         if self.save_token and os.path.isfile(self.save_path):
             with open(self.save_path, encoding='utf8') as f:
                 c = json.load(f)
+                c['draft_box'] = self.load_draft_box(c['draft_box'])
                 self.__dict__.update(c)
 
     def dump(self):
@@ -555,7 +573,14 @@ class Config:
                      'draft_box']
             with open(self.save_path, 'w', encoding='utf8') as f:
                 config = {x: getattr(self, x) for x in attrs}
+                config['draft_box'] = self.save_draft_box()
                 json.dump(config, f)
+
+    def save_draft_box(self):
+        return base64.encodebytes(pickle.dumps(self.draft_box)).decode('latin-1')
+
+    def load_draft_box(self, b):
+        return pickle.loads(base64.decodebytes(b.encode('latin-1')))
 
     def __enter__(self):
         return self
@@ -565,11 +590,18 @@ class Config:
 
 
 class Fan(User):
-    def __init__(self, cfg=None, fill=_sentinel):
+    def __init__(self, cfg=None, **kwargs):
         """
         :param Config cfg: Config 对象
         """
         # Fan as a user with access_token, could not offer id
+
+        self.mentions = Timeline(self, 'statuses/mentions')
+        """返回回复/提到当前用户的20条消息"""
+        self.replies = Timeline(self, 'statuses/replies')
+        """返回当前用户收到的回复"""
+        self.public_timeline = Timeline(self, 'statuses/public_timeline')
+        """返回公共时间线"""
 
         global _session, _cfg
 
@@ -582,8 +614,7 @@ class Fan(User):
                 cfg.access_token = self._xauth()
         _session._populate_attributes(cfg.access_token)
 
-        fill = False if fill == _sentinel else True
-        super(Fan, self).__init__(fill=fill)
+        super(Fan, self).__init__(master=True)
 
     def _oauth(self):
         from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -710,9 +741,6 @@ class Fan(User):
                         in_reply_to_status_id=in_reply_to_status_id,
                         repost_status_id=repost_status_id)
         rs = status.send()
-        if not rs[0]:
-            _logger.error('Send faile, saved to draft box, you can send it later')
-            _cfg.draft_box.append(status)
 
         return rs
 
@@ -724,24 +752,6 @@ class Fan(User):
         return _cfg.draft_box
 
     # 以下是不需要 id 参数，即只能获取当前用户信息的API
-
-    def replies(self, since_id=None, max_id=None, count=None):
-        """返回当前用户收到的回复"""
-        _, rv = _get('statuses/replies',
-                     since_id=since_id, max_id=max_id, count=count)
-        if _:
-            rv = [Status(**s) for s in rv]
-        return _, rv
-
-    def mentions(self, since_id=None, max_id=None, count=None):
-        """
-        返回回复/提到当前用户的20条消息
-        """
-        _, rv = _get('statuses/mentions',
-                     since_id=since_id, max_id=max_id, count=count)
-        if _:
-            return [Status(**s) for s in rv]
-        return _, rv
 
     def follow(self, user):
         """
@@ -769,7 +779,7 @@ class Fan(User):
         """
         _, rv = _get('friendships/requests', count=count)
         if _:
-            rv = [User.get(**b) for b in rv]
+            rv = [User.get(data=b) for b in rv]
         return _, rv
 
     def accept_follower(self, user):
@@ -825,16 +835,9 @@ class Fan(User):
         """返回黑名单上用户资料"""
         _, rv = _get('blocks/blocking')
         if _:
-            rv = [User.get(**b) for b in rv]
+            rv = [User.get(data=b) for b in rv]
         return _, rv
 
     def blocked_id(self):
         """获取用户黑名单id列表"""
         return _get('blocks/ids')
-
-    def public_timeline(self, since_id=None, max_id=None, count=None):
-        _, rv = _get('statuses/public_timeline',
-                     since_id=since_id, max_id=max_id, count=count)
-        if _:
-            rv = [Status(**s) for s in rv]
-        return _, rv
