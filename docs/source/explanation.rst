@@ -18,7 +18,7 @@ User - 猜猜我是谁？
 ---------------------
 
 `User` 是对 API 接口返回的 user 对象的封装，可以通过它访问用户的属性，比如 :attr:`User.id`, :attr:`User.name`, :attr:`User.location` 等。
-它还有一些所有用户共有的一些操作，比如获取用户的消息列表 :meth:`User.statuses` 、关注者列表 :meth:`User.followers` 、好友列表 :meth:`User.friends` 等。
+它还有一些所有用户共有的操作，比如获取用户的消息列表 :attr:`User.statuses` 、关注者列表 :attr:`User.followers` 、好友列表 :attr:`User.friends` 等。
 
 =================   ==================================
 timeline            返回此用户看到的时间线
@@ -27,7 +27,7 @@ photos              浏览此用户发送的图片
 followers           返回此用户的关注者
 friends             返回此用户的关注对象
 favorites           浏览此用户收藏的消息
-relationship        返回此用户与 other 的关系
+relationship()      返回此用户与 other 的关系
 =================   ==================================
 
 Fan - 我才是老大！
