@@ -3,6 +3,7 @@ Quick Start & Installation
 
 Van [#释名]_ 是一个 `Python`_ 编写的 `饭否`_ `SDK`_ ，基于 `饭否官方API`_ 。
 Van 对官方 API 做了合理的抽象和封装，开发者可以使用简洁优雅的接口，轻松操作用户在饭否上的数据。
+
 Van 计划添加一些数据获取接口和任务调度功能，使饭否 Bot 开发更简单。
 
 Quick Start Demo
@@ -29,7 +30,7 @@ Quick Start Demo
 Installation
 ------------
 
-van 只支持 Python3, 请前往官网安装 Python 3.5 以上版本。
+van 只支持 Python3, 请前往官网下载安装 Python 3.5 以上版本。
 
 *如果你是开发者，你也可以帮助我兼容 Python2*
 

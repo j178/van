@@ -12,3 +12,11 @@ van - Fanfou SDK for Human Documents
    intro
    explanation
    api
+
+
+索引
+====
+
+* :ref:`genindex`
+* :ref:`modindex`
+* :ref:`search`

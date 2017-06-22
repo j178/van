@@ -1,24 +1,43 @@
 API Reference
 =============
 
-.. automodule:: van
-    :members: Fan, User, Status, Timeline, Base
-    :undoc-members:
-    :show-inheritance: Fan, User, Status
-    :special-members: __iter__, __call__
+Config
+------
 
-.. .class:: Config
-    py:attr
+.. autoclass:: van.Config
+   :members:
 
-        .. automethod
-        access_token = None
-        auth_type = 'xauth'
-        auto_auth = True
-        consumer_key = None
-        consumer_secret = None
-        save_path = 'van.cfg'
-        save_token = True
-        repost_style_left = ' '
-        repost_style_right = ''
-        xauth_password = None
-        xauth_username = None
+
+Fan
+----
+
+.. autoclass:: van.Fan
+   :members:
+
+User
+----
+
+.. autoclass:: van.User
+   :members:
+
+
+Status
+------
+
+.. autoclass:: van.Status
+   :members:
+
+
+Timeline
+--------
+
+.. autoclass:: van.Timeline
+   :members:
+   :special-members: __iter__, __call__
+
+
+Base
+----
+
+.. autoclass:: van.Base
+   :members:
