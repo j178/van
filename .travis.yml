@@ -26,11 +26,4 @@ before_install:
   - pip install -r requirements-dev.txt
 
 script:
-  - num_errors_code=`pep8 van.py  --max-line-length=120 | wc -l`
-  - echo "$num_errors_code pep8 error in code"
-  - num_errors_test=`pep8 test.py --max-line-length=120 | wc -l`
-  - echo "$num_errors_test pep8 error in test"
-  - num_errors=$((num_errors_code + num_errors_test))
-  - echo "$num_errors pep8 error in all"
-  - if [[ $num_errors -ne '0' ]]; then exit $num_errors; fi
   - nosetests test.py

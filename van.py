@@ -101,6 +101,10 @@ _post = functools.partial(_request, 'POST')
 
 
 class Base:
+    """
+    :class:`User` 和 :class:`Status` 的基类。
+    为子类提供对象缓存和自动加载功能。
+    """
     endpiont = None
     _object_buffer = {}  # 对象缓存
 
@@ -126,6 +130,7 @@ class Base:
     def get(cls, id=None, data=None, **kwargs):
         """
         获取一个对象
+
         :param str id: 对象 ID
         :param dict data: 由字典构造对象
         :rtype: cls
@@ -151,16 +156,12 @@ class Base:
 
 class Timeline:
     """
-    需求:
-    1. 完全隐藏网络请求，将此对象看作无尽的数组，随便取数据
-    2. 整合搜索 API
-    3. 提供多种获取方式，id、id区间、时间区间、关键字
-    4. 提供历史记录，可以往回翻页
-    这是技术含量最高的一个类…
+
     """
 
     def __init__(self, user, endpoint):
         self.user = user
+        """:class:`~van.User` 时间线的主人"""
         self.endpoint = endpoint
         self._pool = []  # type: [Status]
         self._max_id = None
@@ -170,26 +171,53 @@ class Timeline:
         self._curr = 0
 
     def __call__(self, since_id=None, max_id=None, count=60):
+        """
+        调用内部 `_fetch` 方法获取数据。
+        可以自己控制 `since_id`, `max_id` 和 `count` 参数，获取的结果不加入内部缓存。
+
+        :param since_id: 开始的消息ID
+        :param max_id: 结束的消息ID
+        :param count: 获取数量，最大为60
+        :return: :class:`Status` 数组
+        :rtype: [Status]
+        """
         return self._fetch(since_id=since_id, max_id=max_id, count=count)
 
     def tell(self):
+        """
+        返回当前游标的位置
+
+        :rtype: int
+        """
         return self._curr
 
     def rewind(self):
-        """获取最新的状态，并将指针置为0（指向最新的状态）"""
+        """
+        获取最新的状态插入到时间线的头部，并将指针置为0（指向最新的状态）
+
+        :rtype: int
+        """
         self._fetch_newer()
         self._curr = 0
         return 0
 
     def seek(self, offset=None, whence=0):
         """
+        移动游标的位置
 
-        :param offset:
-        :param whence:  * 0 -- start of stream (the default); offset should be zero or positive
-                        * 1 -- current stream position; offset may be negative
-                        * 2 -- end of stream; offset is usually negative
-        :return: Return the new absolute position
-        Warning: 此函数只能在有限范围检查索引范围，请小心使用
+        :param int offset: 偏移量
+        :param int whence: 相对位置
+
+            * 0 -- 相对于时间线开始位置，偏移量必须 >= 0
+            * 1 -- 相对于当前游标位置，偏移量可正可负，超出范围的偏移量会被纠正为边界值
+            * 2 -- 相对于时间线结尾，偏移量 <=0
+
+        .. warning::
+
+            此函数只能在有限范围检查索引范围，请小心使用
+
+        :return: 移动后的游标位置
+        :rtype: int
         """
         if not self._pool:
             self._fetch_older()
@@ -213,6 +241,13 @@ class Timeline:
         return self._curr
 
     def read(self, count=10):
+        """
+        从当前游标位置处往后读取 `count` 条消息
+
+        :param int count: 读取数量
+        :return: :class:`Status` 数组
+        :rtype: [Status]
+        """
         while self._curr + count >= len(self._pool):
             if self._fetch_older() == 0:
                 break
@@ -257,6 +292,10 @@ class Timeline:
         return 0
 
     def __iter__(self):
+        """
+        从当前游标位置开始获取消息，可以像普通数组一样在循环中使用。
+        :return: :class:`Status`
+        """
         while True:
             if self._curr >= len(self._pool):
                 if self._fetch_older() == 0:
@@ -319,36 +358,43 @@ class User(Base):
         self.profile_image_url = data.get('profile_image_url')
         self.profile_image_url_large = data.get('profile_image_url')
 
+    @property
     def followers(self, count=100):
         """
         返回此用户的关注者(前100个)
-        此用户为当前用户的关注对象或未设置隐私"""
+        此用户为当前用户的关注对象或未设置隐私
+        """
         # count=100
         _, rv = _get('statuses/followers', id=self.id, count=count)
         if _:
             rv = [User.get(data=f) for f in rv]
         return _, rv
 
+    @property
     def followers_id(self, count=None):
         """返回此用户关注者的id列表"""
         # count=1..60
         return _get('followers/ids', id=self.id, count=count)
 
+    @property
     def friends(self, count=100):
         """
         返回此用户的关注对象(前100个)
-        此用户为当前用户的关注对象或未设置隐私"""
+        此用户为当前用户的关注对象或未设置隐私
+        """
         # count=100
         _, rv = _get('statuses/friends', id=self.id, count=count)
         if _:
             rv = [User.get(data=f) for f in rv]
         return _, rv
 
+    @property
     def friends_id(self, count=None):
         """返回此用户关注对象的id列表"""
         # count=1..60
         return _get('friends/ids', id=self.id, count=count)
 
+    @property
     def favorites(self, count=None):
         """浏览此用户收藏的消息"""
         _, rv = _get('favorites/id', id=self.id, count=count)
@@ -359,8 +405,9 @@ class User(Base):
     def relationship(self, other):
         """
         返回此用户与 other 的关系： 是否屏蔽，是否关注，是否被关注
+
         :param str|User other: 其他用户
-        :return (a_blocked_b, a_following_b, a_followed_b)
+        :rtype: (a_blocked_b, a_following_b, a_followed_b)
         """
         if isinstance(other, User):
             other = other.id
@@ -473,6 +520,7 @@ class Status(Base):
             rs = self.init(rs)
         return _, rs
 
+    @property
     def context(self):
         """按照时间先后顺序显示消息上下文"""
         _, rv = _get('statuses/context_timeline', id=self.id)
@@ -590,6 +638,10 @@ class Config:
 
 
 class Fan(User):
+    """
+    模拟
+    """
+
     def __init__(self, cfg=None, **kwargs):
         """
         :param Config cfg: Config 对象
@@ -597,7 +649,7 @@ class Fan(User):
         # Fan as a user with access_token, could not offer id
 
         self.mentions = Timeline(self, 'statuses/mentions')
-        """返回回复/提到当前用户的20条消息"""
+        """返回提到当前用户的20条消息"""
         self.replies = Timeline(self, 'statuses/replies')
         """返回当前用户收到的回复"""
         self.public_timeline = Timeline(self, 'statuses/public_timeline')
@@ -736,7 +788,15 @@ class Fan(User):
 
     def update_status(self, text, photo=None, in_reply_to_user_id=None,
                       in_reply_to_status_id=None, repost_status_id=None):
-        """发表新状态"""
+        """
+        发表新状态，:meth:`Status.send()` 的快捷方式。
+
+        :param str text: 文字
+        :param str photo: 照片路径或者URL
+        :param str in_reply_to_user_id: 要回复的用户ID
+        :param str in_reply_to_status_id: 要回复的消息ID
+        :param str repost_status_id: 要转发的消息ID
+        """
         status = Status(text=text, photo=photo, in_reply_to_user_id=in_reply_to_user_id,
                         in_reply_to_status_id=in_reply_to_status_id,
                         repost_status_id=repost_status_id)
@@ -744,10 +804,12 @@ class Fan(User):
 
         return rs
 
+    @property
     def draft_box(self):
         """
         显示发送失败的消息列表
-        :rtype [Status]
+
+        :rtype: [Status]
         """
         return _cfg.draft_box
 
@@ -756,6 +818,7 @@ class Fan(User):
     def follow(self, user):
         """
         关注用户
+
         :param User|str user: 被关注的用户, User对象，或id，或 loginname
         """
         if isinstance(user, User):
@@ -765,7 +828,8 @@ class Fan(User):
 
     def unfollow(self, user):
         """
-        关注用户
+        取消关注用户
+
         :param User|str user: 被关注的用户, User对象，或id，或 loginname
         """
         if isinstance(user, User):
@@ -773,9 +837,12 @@ class Fan(User):
         rs = _post('friendships/destroy', id=user)
         return rs
 
+    @property
     def follow_requests(self, count=60):
         """
         返回请求关注当前用户的列表
+
+        :rtype: (bool, [User])
         """
         _, rv = _get('friendships/requests', count=count)
         if _:
@@ -785,7 +852,9 @@ class Fan(User):
     def accept_follower(self, user):
         """
         接受关注请求
+
         :param User|str user: User对象，或id，或 loginname
+        :rtype: (bool, User)
         """
         if isinstance(user, User):
             user = user.id
@@ -794,8 +863,10 @@ class Fan(User):
 
     def deny_follower(self, user):
         """
-        接受关注请求
+        拒绝关注请求
+
         :param User|str user: User对象，或id，或 loginname
+        :rtype: (bool, User)
         """
         if isinstance(user, User):
             user = user.id
@@ -805,7 +876,9 @@ class Fan(User):
     def block(self, user):
         """
         屏蔽用户
+
         :param str|User user: 被屏蔽的用户User对象或者id，loginname
+        :rtype: (bool, User)
         """
         if isinstance(user, User):
             user = user.id
@@ -815,7 +888,9 @@ class Fan(User):
     def unblock(self, user):
         """
         解除屏蔽
+
         :param str|User user: 被屏蔽的用户User对象或者id，loginname
+        :rtype: (bool, str)
         """
         if isinstance(user, User):
             user = user.id
@@ -825,19 +900,31 @@ class Fan(User):
     def is_blocked(self, user):
         """
         检查是否屏蔽用户
+
         :param str|User user: 用户User对象或者id，loginname
+        :rtype: (bool, str)
         """
         if isinstance(user, User):
             user = user.id
         return _get('blocks/exists', id=user)
 
-    def blocked(self):
-        """返回黑名单上用户资料"""
+    @property
+    def blocked_users(self):
+        """
+        返回黑名单上用户列表
+
+        :rtype: (bool, [User])
+        """
         _, rv = _get('blocks/blocking')
         if _:
             rv = [User.get(data=b) for b in rv]
         return _, rv
 
-    def blocked_id(self):
-        """获取用户黑名单id列表"""
+    @property
+    def blocked_users_id(self):
+        """
+        获取用户黑名单id列表
+
+        :rtype: (bool, [str])
+        """
         return _get('blocks/ids')
