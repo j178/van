@@ -3,7 +3,10 @@ import io
 import time
 import base64
 
-from van import Fan, Config, Status, User
+try:
+    from fanfou_sdk.van import Fan, Config, Status, User
+except ImportError:
+    from van import Fan, Config, Status, User
 
 access_token = {
     "oauth_token": os.environ['ACCESS_TOKEN'],
@@ -71,20 +74,20 @@ class TestAPI:
         cfg.access_token = access_token
         self.cfg = cfg
         self.me = Fan.get(cfg=cfg)  # type:Fan
-        self.status = Status(id='F-1QZWogWCE')
+        self.status = Status.get(id='F-1QZWogWCE')
         self.other = User.get(id='john.j')
 
     def test_user_api(self):
-        assert self.me is Fan.get(id=self.me.id, cfg=self.cfg)
+        assert self.me is Fan.get(id=self.me.id)
 
-        self.me.followers()
-        self.me.followers_id()
-        self.me.friends()
-        self.me.friends_id()
-        self.me.photos()
-        self.me.favorites()
-        self.me.follow_requests()
-        self.me.draft_box()
+        print(self.me.followers)
+        print(self.me.followers_id)
+        print(self.me.friends)
+        print(self.me.friends_id)
+        print(self.me.photos)
+        print(self.me.favorites)
+        print(self.me.follow_requests)
+        print(self.me.draft_box)
 
     def test_follow(self):
         _, rs = self.me.follow(self.other)
@@ -103,8 +106,8 @@ class TestAPI:
             if _:
                 assert not self.me.relationship(self.other)[1][0]
 
-            print(self.me.blocked_id())
-            print(self.me.blocked())
+            print(self.me.blocked_users_id)
+            print(self.me.blocked_users)
 
     def test_timeline(self):
         self.me.timeline.read()
