@@ -4,15 +4,32 @@ Explanation
 总体设计
 ---------
 
-van 的所有功能分布在五个类中, `Fan`、 `Config`、 `User`、 `Status` 和 `Timeline`.
+van 的所有功能分布在五个类中, :class:`~van.Fan`、 :class:`~van.Config`、 :class:`~van.User`、 :class:`~van.Status` 和 :class:`~van.Timeline`.
 
 van 的所有 API 调用均返回一个二元组 (bool, value)。
 第一个元素如果为 `True`, 则表示调用成功，那么第二个元素为调用的结果；
 如果第一个元素为 `False`，表示调用失败，那么第二个元素表示失败的原因。
 所以，调用 API 之后一定要先判断第一个元素，再决定是否使用第二个元素。通常的使用方式为::
+
     _, rv = me.follow(user)
     if _:
         # 使用 rv 做一些事
+
+另外，van 为了节省内存和避免重复创建相同对象，在基类 :class:`~van.Base` 中提供了对象缓存功能。
+
+为了使用缓存功能，在创建 :class:`~van.User`, :class:`~van.Fan`, 和 :class:`~van.Status` 对象时，需要使用 :meth:`~van.Base.get()` 方法，而不是构造函数::
+
+    me = Fan.get(cfg=cfg)
+    user = User.get(id='abcd')
+    status = Status.get(data=data)
+
+但是，在构造一个不完全对象时 (即，只手动填充了部分属性)，可以使用构造函数。比如在创建一个即将被发送的 :class:`~van.Status` 对象时，需要手动为其填充部分属性::
+
+    status = Status(text="hello", in_reply_to_user_id='abc')
+    status.send()
+
+在调用 :meth:`~van.Status.send()` 之后，该对象的属性会被服务器返回的数据填充完整。
+
 
 User - 猜猜我是谁？
 ---------------------

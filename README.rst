@@ -21,7 +21,7 @@ Van - Fanfou SDK
     :target: https://gitter.im/fan-van/Lobby?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=body_badge
 
 
-详细文档请前往 ➔ `Readthedocs <http://van.readthedocs.io/zh/latest/?badge=latest>`_
+详细文档请前往 ➔ `Readthedocs <http://van.readthedocs.io>`_
 
 
 Example
@@ -46,7 +46,7 @@ Example
 Installation
 ============
 
-van 只支持 Python3, 请前往官网安装 Python 3.5 以上版本。
+van 只支持 Python3, 请前往官网下载安装 Python 3.5 以上版本。
 
 *如果你是开发者，你也可以帮助我兼容 Python2*
 

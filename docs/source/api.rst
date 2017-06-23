@@ -6,6 +6,7 @@ Config
 
 .. autoclass:: van.Config
    :members:
+   :undoc-members:
 
 
 Fan
@@ -33,7 +34,7 @@ Timeline
 
 .. autoclass:: van.Timeline
    :members:
-   :special-members: __iter__, __call__
+   :special-members: __iter__, __call__, __len__
 
 
 Base
@@ -41,3 +42,8 @@ Base
 
 .. autoclass:: van.Base
    :members:
+
+Misc
+----
+
+.. autodata:: van.Photo
