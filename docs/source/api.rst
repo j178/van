@@ -34,7 +34,7 @@ Timeline
 
 .. autoclass:: van.Timeline
    :members:
-   :special-members: __iter__, __call__, __len__
+   :special-members: __iter__, __len__
 
 
 Base

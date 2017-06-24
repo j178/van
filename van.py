@@ -5,30 +5,28 @@ from __future__ import print_function, unicode_literals, absolute_import
 
 import atexit
 import base64
-import io
+import functools
 import json
 import logging
 import os
 import pickle
 import re
 import sys
+import threading
 import time
 from collections import namedtuple
 from urllib.parse import urlparse
-
-import functools
 
 import arrow
 import requests
 from requests_oauthlib.oauth1_session import OAuth1Session, TokenRequestDenied
 
-__version__ = '0.0.3'
+__version__ = '0.0.4'
 __all__ = ['Fan', 'User', 'Status', 'Timeline', 'Config']
 
 _session = None  # type: OAuth1Session
 _cfg = None  # type: Config
 _logger = logging.getLogger(__name__)
-_sentinel = object()
 
 
 class AuthFailed(Exception):
@@ -52,13 +50,12 @@ def get_photo(p):
         try:
             url = p.strip('\'').strip('"')
             if urlparse(url).scheme != '':
-                resp = requests.get(url)
+                resp = requests.get(url, stream=True)
                 resp.raise_for_status()
                 if not resp.headers.get('Content-Type', '').lower().startswith('image/'):
                     return False
-                data = io.BytesIO(resp.content)
-                return data
-        except requests.RequestException as e:
+                return resp.raw
+        except requests.RequestException:
             return False
     return False
 
@@ -82,9 +79,11 @@ def _request(method, endpoint, **data):
     url = 'http://api.fanfou.com/{}.json'.format(endpoint)
     d = {{'GET': 'params', 'POST': 'data'}[method]: data}
 
+    timeout = _cfg.timeout
+    fail_sleep_time = _cfg.fail_sleep_time
     for failure in range(3):
         try:
-            result = _session.request(method, url, **d, files=files, timeout=_cfg.timeout)
+            result = _session.request(method, url, **d, files=files, timeout=timeout)
             j = result.json()
             if result.status_code == 200:
                 return True, j
@@ -93,10 +92,10 @@ def _request(method, endpoint, **data):
         except requests.RequestException as e:
             _logger.error(e)
             timeout += 2
-            sleep_time += 2
+            fail_sleep_time += 2
             if failure >= 2:
                 raise
-        time.sleep(_cfg.fail_sleep_time)
+        time.sleep(fail_sleep_time)
 
 
 _get = functools.partial(_request, 'GET')
@@ -174,19 +173,6 @@ class Timeline:
         self._since_rawid = 999999999  # 什么时候饭否消息会达到这个数字呢？
         self._curr = 0
 
-    def __call__(self, since_id=None, max_id=None, count=60):
-        """
-        调用内部 `_fetch` 方法获取数据。
-        可以自己控制 `since_id`, `max_id` 和 `count` 参数，获取的结果不加入内部缓存。
-
-        :param since_id: 开始的消息ID
-        :param max_id: 结束的消息ID
-        :param count: 获取数量，最大为60
-        :return: :class:`Status` 数组
-        :rtype: [Status]
-        """
-        return self._fetch(since_id=since_id, max_id=max_id, count=count)
-
     def tell(self):
         """
         返回当前游标的位置
@@ -216,7 +202,7 @@ class Timeline:
             * 1 -- 相对于当前游标位置，偏移量可正可负，超出范围的偏移量会被纠正为边界值
             * 2 -- 相对于时间线结尾，偏移量 <=0
 
-        .. note::
+        .. attention::
 
             此函数只能在有限范围满足索引要求，超出范围太多的偏移量会被自动纠正为合法值。
 
@@ -259,10 +245,16 @@ class Timeline:
         self._curr += count
         return rv
 
-    def _fetch(self, since_id=None, max_id=None, count=60):
+    def fetch(self, since_id=None, max_id=None, count=60):
         """
-        返回此**看到的**时间线
-        此用户为当前用户的关注对象或未设置隐私
+        调用 API 获取数据。
+        可以自己控制 `since_id`, `max_id` 和 `count` 参数，获取的结果不加入内部缓存。
+
+        :param since_id: 开始的消息ID
+        :param max_id: 结束的消息ID
+        :param count: 获取数量，最大为60
+        :return: :class:`Status` 数组
+        :rtype: [Status]
         """
         _, rv = _get(self.endpoint, id=self.user.id,
                      since_id=since_id, max_id=max_id, count=count)
@@ -271,7 +263,7 @@ class Timeline:
         return _, rv
 
     def _fetch_older(self):
-        _, rv = self._fetch(max_id=self._since_id)
+        _, rv = self.fetch(max_id=self._since_id)
         if _ and rv:
             self._since_id = rv[-1].id
             self._since_rawid = rv[-1].rawid
@@ -283,7 +275,7 @@ class Timeline:
         return 0
 
     def _fetch_newer(self):
-        _, rv = self._fetch(since_id=self._max_id)
+        _, rv = self.fetch(since_id=self._max_id)
         if _ and rv:
             self._max_id = rv[0].id
             self._max_rawid = rv[0].rawid
@@ -661,7 +653,7 @@ class Fan(User):
     模拟
     """
 
-    def __init__(self, *, cfg=None, **kwargs):
+    def __init__(self, *, cfg, **kwargs):
         """
         :param Config cfg: Config 对象
         """
@@ -674,20 +666,29 @@ class Fan(User):
         self.public_timeline = Timeline(self, 'statuses/public_timeline')
         """返回公共时间线"""
 
-        global _session, _cfg
-
-        self._cfg = _cfg = cfg
-        _session = OAuth1Session(cfg.consumer_key, cfg.consumer_secret)
-        if not cfg.access_token:
-            if cfg.auth_type == 'oauth':
-                cfg.access_token = self._oauth()
-            else:
-                cfg.access_token = self._xauth()
-        _session._populate_attributes(cfg.access_token)
+        self.setup(cfg)
 
         super(Fan, self).__init__(master=True)
 
-    def _oauth(self):
+    @classmethod
+    def setup(cls, cfg):
+        """
+
+        :param Config cfg:
+        """
+        global _session, _cfg
+
+        _cfg = cfg
+        _session = OAuth1Session(cfg.consumer_key, cfg.consumer_secret)
+        if not cfg.access_token:
+            if cfg.auth_type == 'oauth':
+                cfg.access_token = cls._oauth(cfg)
+            else:
+                cfg.access_token = cls._xauth(cfg)
+        _session._populate_attributes(cfg.access_token)
+
+    @staticmethod
+    def _oauth(cfg):
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
         callback_request = None
@@ -739,10 +740,10 @@ class Fan(User):
                 callback_request = callback
 
         try:
-            _session.fetch_request_token(self._cfg.request_token_url)
+            _session.fetch_request_token(cfg.request_token_url)
             authorization_url = _session.authorization_url(
-                    self._cfg.authorize_url,
-                    callback_uri=self._cfg.redirect_url)
+                    cfg.authorize_url,
+                    callback_uri=cfg.redirect_url)
 
             print('[-] 初次使用，此工具需要你的授权才能工作/_\\', 'cyan')
             if get_input('[-] 是否自动在浏览器中打开授权链接(y/n)>') == 'y':
@@ -752,19 +753,19 @@ class Fan(User):
                 print('[-] 请在浏览器中打开此链接: ', 'cyan')
                 print(authorization_url)
 
-            if self._cfg.auto_auth:
-                start_oauth_server(self._cfg.redirect_url)
+            if cfg.auto_auth:
+                start_oauth_server(cfg.redirect_url)
             else:
                 callback_request = get_input('[-] 请手动粘贴跳转后的链接>')
 
             if callback_request:
                 try:
                     _session.parse_authorization_response(
-                            self._cfg.redirect_url + callback_request)
+                            cfg.redirect_url + callback_request)
                     # requests-oauthlib换取access token时verifier是必须的，
                     # 而饭否在上一步是不返回verifier的，所以必须手动设置
                     access_token = _session.fetch_access_token(
-                            self._cfg.access_token_url, verifier='123')
+                            cfg.access_token_url, verifier='123')
                 except ValueError:
                     raise AuthFailed
                 return access_token
@@ -773,15 +774,16 @@ class Fan(User):
         except TokenRequestDenied:
             raise AuthFailed('授权失败，请检查本地时间与网络时间是否同步')
 
-    def _xauth(self):
+    @staticmethod
+    def _xauth(cfg):
         from oauthlib.oauth1 import Client as OAuth1Client
         from oauthlib.oauth1.rfc5849 import utils
         import getpass
         # patch utils.filter_params
         utils.filter_oauth_params = lambda t: t
 
-        username = self._cfg.xauth_username or get_input('[-]请输入用户名或邮箱>')
-        password = self._cfg.xauth_password or getpass.getpass('[-]请输入密码>')
+        username = cfg.xauth_username or get_input('[-]请输入用户名或邮箱>')
+        password = cfg.xauth_password or getpass.getpass('[-]请输入密码>')
         # 这些实际上并不是url params，但是他们与其他url params一样参与签名，
         # 最终成为Authorization header的值
         args = [
@@ -799,9 +801,9 @@ class Fan(User):
                 params.extend(args)
                 return params
 
-        sess = OAuth1Session(self._cfg.consumer_key, self._cfg.consumer_secret,
+        sess = OAuth1Session(cfg.consumer_key, cfg.consumer_secret,
                              client_class=OAuth1ClientPatch)
-        access_token = sess.fetch_access_token(self._cfg.access_token_url,
+        access_token = sess.fetch_access_token(cfg.access_token_url,
                                                verifier='123')
         return access_token
 
@@ -947,3 +949,158 @@ class Fan(User):
         :rtype: (bool, [str])
         """
         return _get('blocks/ids')
+
+
+class Event:
+    """
+    MESSAGE_CREATE： 当前用户发布一条状态。source为当前用户，如果消息中@其他人，则target为被提及用户，object为发布的状态
+    MESSAGE_DELETE： 当前用户删除一条状态
+
+    FRIENDS_CREATE：当前用户关注其他用户。source为当前用户，target为被关注的对象
+    FRIENDS_DELETE： 当前用户取消关注其他用户
+    FRIENDS_REQUEST： 当前用户对其他用户发起关注请求
+
+    FAV_CREATE：当前用户收藏一条状态。 source 为发起收藏操作的用户，target为状态被收藏的用户，object为被收藏的状态
+    FAV_DELETE：当前用户取消收藏一条状态
+
+    USER_UPDATE_PROFILE：当前用户更新个人资料
+    """
+    HEART_BEAT = 0b000001_000
+    ERROR = 0b000010_000
+
+    MESSAGE_CREATE = 0b000100_001
+    MESSAGE_DELETE = 0b000100_010
+    MESSAGE = MESSAGE_CREATE | MESSAGE_DELETE
+
+    FRIENDS_CREATE = 0b001000_001
+    FRIENDS_DELETE = 0b001000_010
+    FRIENDS_REQUEST = 0b01000_100
+    FRIENDS = FRIENDS_CREATE | FRIENDS_DELETE | FRIENDS_REQUEST
+
+    FAV_CREATE = 0b010000_001
+    FAV_DELETE = 0b010000_010
+    FAV = FAV_CREATE | FAV_DELETE
+
+    USER_UPDATE_PROFILE = 0b100000_001
+    USER = USER_UPDATE_PROFILE
+
+    ALL = MESSAGE | FRIENDS | FAV | USER | HEART_BEAT | ERROR
+
+    def __init__(self, type, data=None):
+        data = data if isinstance(data, dict) else dict(object=data)
+        self.type = type
+        source = data.get('source')
+        target = data.get('target')
+        object = data.get('object')
+        event = data.get('event')
+        created_at = data.get('created_at')
+
+        self.source = User.get(data=source) if isinstance(source, dict) else source
+        self.target = User.get(data=target) if isinstance(target, dict) else target
+        self.object = Status.get(data=object) if isinstance(object, dict) else object
+        self.event = event
+        self.created_at = arrow.get(created_at, 'ddd, DD MMM YYYY HH:mm:ss') if created_at else created_at
+
+    def __str__(self):
+        return '<Event {0.type} {0.source} {0.target} {0.object} {0.event} {0.created_at}>'.format(self)
+
+
+Listener = namedtuple('Listener', ['on', 'func', 'ttl'])
+"""监听器对象"""
+
+_EVENT_HEART_BEAT = Event(Event.HEART_BEAT, r'\r\n')
+
+
+class Stream:
+    """
+
+    """
+
+    def __init__(self):
+        self._conn = None
+        self._listeners = []  # type:[Listener]
+        self._lock = threading.Lock()
+        self._running = True
+        self.init()
+
+    def init(self):
+        """
+        开始建立连接
+        """
+        self._conn = _session.post('http://stream.fanfou.com/1/user.json', stream=True)
+
+    def stop(self):
+        """
+        停止监听事件
+        """
+        self._running = False
+
+    def run(self):
+        """
+        开始监听事件
+        """
+
+        def go():
+            for chunk in self._conn.iter_content(chunk_size=None, decode_unicode=True):
+                evt = self._parse_chunk(chunk)
+                for func in self._pick_listeners(evt):
+                    try:
+                        func(evt)
+                    except Exception as e:
+                        _logger.error(e)
+                if not self._running:
+                    break
+            self._conn.close()
+
+        thread = threading.Thread(target=go)
+        thread.start()
+        return thread
+
+    def _pick_listeners(self, event):
+        with self._lock:
+            for lsn in self._listeners:
+                if lsn.on & event.type and (lsn.ttl is None or lsn.ttl > 0):
+                    yield lsn.func
+
+                    if lsn.ttl is not None:
+                        lsn.ttl -= 1
+
+    @staticmethod
+    def _parse_chunk(chunk: bytes):
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode('utf8')
+        if chunk == '\r\n':
+            return _EVENT_HEART_BEAT
+
+        try:
+            data = json.loads(chunk.strip())
+        except json.JSONDecodeError as e:
+            _logger.error(e)
+            return Event(Event.ERROR, e)
+
+        event_name = data['event'].upper().replace('.', '_')
+        type = getattr(Event, event_name, Event.ERROR)
+
+        event = Event(type, data)
+        return event
+
+    def install_listener(self, listener):
+        """
+        添加新的监听器
+        :param Listener listener: Listener 对象
+        """
+        with self._lock:
+            self._listeners.append(listener)
+
+    def on(self, event, ttl=None):
+        """
+        作为装饰器使用，添加新的监听器
+        :param event: 监听的事件, 多个事件请用 | 连接。如 Event.MESSAGE | Event.FREIENDS
+        :param int ttl: 此监听器执行的次数，None表示不限次数
+        """
+
+        def decorator(func):
+            listener = Listener(event, func, ttl)
+            self.install_listener(listener)
+
+        return decorator

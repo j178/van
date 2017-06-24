@@ -1,21 +1,20 @@
-import os
+import base64
 import io
+import os
 import random
 import string
-import time
-import base64
 
 import arrow
-from nose.tools import assert_raises
+from nose.tools import *
 
 try:
-    from fanfou_sdk.van import Fan, Config, Status, User, Photo
+    from fanfou_sdk.van import Fan, Config, Status, User, Photo, Stream, Event
 except ImportError:
-    from van import Fan, Config, Status, User, Photo
+    from van import Fan, Config, Status, User, Photo, Stream
 
-access_token = {
-    "oauth_token": os.environ['ACCESS_TOKEN'],
-    "oauth_token_secret": os.environ['ACCESS_TOKEN_SECRET']
+ACCESS_TOKEN = {
+    "oauth_token": os.environ.get('ACCESS_TOKEN'),
+    "oauth_token_secret": os.environ.get('ACCESS_TOKEN_SECRET')
 }
 
 
@@ -28,7 +27,7 @@ RAW_PHOTO = b'/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBA
 
 
 def random_str(length=10):
-    return ''.join(random.choice(string.ascii_letters) for _ in range(length))
+    return ''.join(random.choice(string.printable) for _ in range(length))
 
 
 class TestAuth:
@@ -45,97 +44,101 @@ class TestAuth:
 
 class TestConfig:
     def setup(self):
+        # teardown 和 setup 在每个测试函数调用时都会调用一次
         cfg = MyConfig()
         cfg.save_token = True
         self.cfg = cfg
 
-    def test_dump(self):
-        self.cfg.dump()
-        assert os.path.isfile(self.cfg.save_path)
-
     def test_load(self):
         self.cfg.load()
 
-    def teardown(self):
-        try:
-            os.remove(self.cfg.save_path)
-        except FileNotFoundError:
-            print('fuck you !!!')
+    def test_dump(self):
+        self.cfg.dump()
+        assert os.path.isfile(self.cfg.save_path)
+        os.remove(self.cfg.save_path)
 
 
 class TestAPI:
     def setup(self):
         cfg = MyConfig()
-        cfg.access_token = access_token
+        cfg.access_token = ACCESS_TOKEN
+        cfg.timeout = 10
+        cfg.fail_sleep_time = 10
+
         self.cfg = cfg
         self.me = Fan.get(cfg=cfg)  # type:Fan
-        self.other = User.get(id='john.j')  # type:Fan
-        _, self.status = Status(text=random_str()).send()
-        _, self.photo_status = Status(text=random_str(), photo=io.BytesIO(base64.decodebytes(RAW_PHOTO))).send()
 
     def test_user_api(self):
-        assert self.me is Fan.get(id=self.me.id)
+        assert_is(self.me, Fan.get(id=self.me.id))
 
-        print(self.me.id)
-        print(self.me.name)
-        print(self.me.location)
-        print(self.me.screen_name)
-        print(self.me.unique_id)
-        print(self.me.gender)
-        assert isinstance(self.me.created_at, arrow.Arrow)
+        assert_is_not_none(self.me.id)
+        assert_is_not_none(self.me.name)
+        assert_is_not_none(self.me.location)
+        assert_is_not_none(self.me.screen_name)
+        assert_is_not_none(self.me.unique_id)
+        assert_is_not_none(self.me.gender)
+        assert_is_instance(self.me.created_at, arrow.Arrow)
 
-        print(self.me.followers)
-        print(self.me.followers_id)
-        print(self.me.friends)
-        print(self.me.friends_id)
-        print(self.me.photos)
-        print(self.me.favorites)
-        print(self.me.follow_requests)
-        print(self.me.draft_box)
+        assert_is_not_none(self.me.followers)
+        assert_is_not_none(self.me.followers_id)
+        assert_is_not_none(self.me.friends)
+        assert_is_not_none(self.me.friends_id)
+        assert_is_not_none(self.me.photos)
+        assert_is_not_none(self.me.favorites)
+        assert_is_not_none(self.me.follow_requests)
+        assert_is_not_none(self.me.draft_box)
+        assert_is_not_none(self.me.blocked_users)
+        assert_is_not_none(self.me.blocked_users_id)
 
     def test_follow(self):
-        self.me.follow(self.other)
-        assert self.me.relationship(self.other)[1][1]
-        self.me.unfollow(self.other)
-        assert not self.me.relationship(self.other)[1][1]
+        other = User.get(id='john.j')  # type:Fan
+
+        self.me.follow(other)
+        assert_true(self.me.relationship(other)[1][1])
+        self.me.unfollow(other)
+        assert_false(self.me.relationship(other)[1][1])
 
     def test_block(self):
-        self.me.block(self.other)
-        assert self.me.relationship(self.other)[1][0]
-        assert self.me.is_blocked(self.other)[1]
-        self.me.unblock(self.other)
-        assert not self.me.relationship(self.other)[1][0]
+        other = User.get(id='john.j')  # type:Fan
 
-        print(self.me.blocked_users_id)
-        print(self.me.blocked_users)
+        self.me.block(other)
+        assert_true(self.me.relationship(other)[1][0])
+        assert_true(self.me.is_blocked(other)[1])
+        self.me.unblock(other)
+        assert_false(self.me.relationship(other)[1][0])
 
     def test_status(self):
-        print(self.status.text)
-        print(self.status.context)
-        assert isinstance(self.photo_status.photo, Photo)
-        assert self.status.user is self.me
-        assert isinstance(self.status.created_at, arrow.Arrow)
+        _, status = Status(text=random_str()).send()
+        _, photo_status = Status(text=random_str(), photo=io.BytesIO(base64.decodebytes(RAW_PHOTO))).send()
 
-        self.status.reply(random_str())
-        self.status.reply(random_str(), photo=io.BytesIO(base64.decodebytes(RAW_PHOTO)))
-        self.status.repost(random_str())
-        self.status.repost(random_str(), photo=io.BytesIO(base64.decodebytes(RAW_PHOTO)))
+        assert_is_not_none(status.text)
+        assert_is_not_none(status.context)
+        assert_is_instance(photo_status.photo, Photo)
+        assert_is(status.user, self.me)
+        assert_is_instance(status.created_at, arrow.Arrow)
 
-        assert self.status.favorite()[1].favorited
-        assert not self.status.unfavorite()[1].favorited
+        status.reply(random_str())
+        status.reply(random_str(), photo=io.BytesIO(base64.decodebytes(RAW_PHOTO)))
+        status.repost(random_str())
+        status.repost(random_str(), photo=io.BytesIO(base64.decodebytes(RAW_PHOTO)))
+
+        assert_true(status.favorite()[1].favorited)
+        assert_false(status.unfavorite()[1].favorited)
 
 
 class TestTimeline:
     def setup(self):
         cfg = MyConfig()
-        cfg.access_token = access_token
+        cfg.access_token = ACCESS_TOKEN
         cfg.timeout = 10
         cfg.fail_sleep_time = 10
+
         self.cfg = cfg
         self.me = Fan.get(cfg=cfg)  # type:Fan
         self.tl = self.me.timeline
 
     def test_access(self):
+        self.tl.read()
         self.me.statues.read()
         self.me.replies.read()
         self.me.mentions.read()
@@ -143,25 +146,59 @@ class TestTimeline:
 
     def test_call(self):
         tl = self.tl
-        print(tl(count=10))
+        assert_is_not_none(tl.fetch(count=10))
 
     def test_seek(self):
         tl = self.tl
         tl.read(count=60)
-        assert tl.tell() == 60
+        assert_equal(tl.tell(), 60)
+
         tl.rewind()
-        assert tl.tell() == 0
-        assert tl.seek(10) == 10
+        assert_equal(tl.tell(), 0)
+        assert_equal(tl.seek(10), 10)
         assert_raises(ValueError, tl.seek, -1)
-        assert tl.seek(1000) == len(tl) - 1
+        assert_equal(tl.seek(1000), len(tl) - 1)
+
         tl.rewind()
         tl.seek(10)
-        assert tl.seek(10, 1) == 20
-        assert tl.seek(-10, 2) == len(tl) - 10
+        assert_equal(tl.seek(10, 1), 20)
+        assert_equal(tl.seek(-10, 2), len(tl) - 10)
+
         tl.rewind()
         tl.seek(10)
-        assert tl.seek(-5, 1) == 5
-        assert tl.seek(1000, 1) == len(tl) - 1
+        assert_equal(tl.seek(-5, 1), 5)
+        assert_equal(tl.seek(1000, 1), len(tl) - 1)
+
         tl.rewind()
-        assert tl.seek(1000, 2) == len(tl) - 1
-        assert tl.seek(-1000, 2) == 0
+        assert_equal(tl.seek(1000, 2), len(tl) - 1)
+        assert_equal(tl.seek(-1000, 2), 0)
+
+
+class TestStream:
+    def setup(self):
+        cfg = MyConfig()
+        cfg.access_token = ACCESS_TOKEN
+        Fan.setup(cfg)
+        self.s = Stream()
+        self.thread = self.s.run()
+
+    def teardown(self):
+        self.s.stop()
+
+    def test_api(self):
+        @self.s.on(Event.ALL)
+        def listener(evt):
+            print(evt)
+
+        assert_equal(len(self.s._listeners), 1)
+
+        @self.s.on(Event.MESSAGE | Event.FAV, ttl=3)
+        def _(evt):
+            print(evt)
+
+        assert_equal(len(self.s._listeners), 2)
+
+        @self.s.on(Event.HEART_BEAT)
+        def _(evt):
+            assert_is_instance(evt, Event)
+            assert_equal(evt.object, r'\r\n')
