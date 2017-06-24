@@ -93,7 +93,7 @@ class TestAPI:
         assert_is_not_none(self.me.blocked_users_id)
 
     def test_follow(self):
-        other = User.get(id='john.j')  # type:Fan
+        other = User.get(id='chengyujun')  # type:Fan
 
         self.me.follow(other)
         assert_true(self.me.relationship(other)[1][1])
@@ -101,7 +101,7 @@ class TestAPI:
         assert_false(self.me.relationship(other)[1][1])
 
     def test_block(self):
-        other = User.get(id='john.j')  # type:Fan
+        other = User.get(id='chengyujun')  # type:Fan
 
         self.me.block(other)
         assert_true(self.me.relationship(other)[1][0])
