@@ -3,10 +3,63 @@ API Reference
 
 Config
 ------
+.. py:class:: van.Config
 
-.. autoclass:: van.Config
-   :members:
-   :undoc-members:
+   .. py:attribute:: consumer_key
+
+      申请应用之后获得
+
+   .. py:attribute:: consumer_secret
+
+      申请应用之后获得
+
+   .. py:attribute:: auth_type
+
+      授权类型：xauth 或者 oauth
+
+   .. py:attribute:: save_token
+
+      是否保存授权后获得的 token，下次使用无需重新授权
+
+   .. py:attribute:: save_path
+
+      token 的保存位置。默认为当前目录下的 `van.cfg` 文件
+
+   .. py:attribute:: access_token
+
+      如果你已经获得了 token, 可以直接填写在这里。
+
+   .. py:attribute:: xauth_username
+
+      使用 xauth 授权方式时需要的用户名。
+
+   .. py:attribute:: xauth_password
+
+      使用 xauth 授权方式时需要的密码。
+
+   .. warning::
+
+      建议用户名和密码，和 token 都不要直接写在代码中，可以使用环境变量提供或者在程序运行时手动输入。
+
+   .. py:attribute:: auto_auth
+
+      如果使用 oauth 认证方式，是否自动在本地开启服务器等待授权。
+
+   .. py:attribute:: repost_style_left
+
+      转发消息的样式，左边部分。
+
+   .. py:attribute:: repost_style_right
+
+      转发消息的样式，右边部分。
+
+   .. py:attribute:: timeout
+
+      网络请求的 timeout。
+
+   .. py:attribute:: fail_sleep_time
+
+      API 请求失败后的 sleep 时间。
 
 
 Fan
