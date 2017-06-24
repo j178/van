@@ -678,7 +678,7 @@ class Fan(User):
         """
         global _session, _cfg
 
-        _cfg = cfg
+        _cfg=_cfg = cfg
         _session = OAuth1Session(cfg.consumer_key, cfg.consumer_secret)
         if not cfg.access_token:
             if cfg.auth_type == 'oauth':
@@ -953,17 +953,24 @@ class Fan(User):
 
 class Event:
     """
-    MESSAGE_CREATE： 当前用户发布一条状态。source为当前用户，如果消息中@其他人，则target为被提及用户，object为发布的状态
-    MESSAGE_DELETE： 当前用户删除一条状态
+    事件对象，模拟一个事件发生时相关的数据
 
-    FRIENDS_CREATE：当前用户关注其他用户。source为当前用户，target为被关注的对象
-    FRIENDS_DELETE： 当前用户取消关注其他用户
-    FRIENDS_REQUEST： 当前用户对其他用户发起关注请求
+    每个事件都有一个类型，当前可用的类型有：
 
-    FAV_CREATE：当前用户收藏一条状态。 source 为发起收藏操作的用户，target为状态被收藏的用户，object为被收藏的状态
-    FAV_DELETE：当前用户取消收藏一条状态
+        * MESSAGE_CREATE： 当前用户发布一条状态。source为当前用户，如果消息中@其他人，则target为被提及用户，object为发布的状态
+        * MESSAGE_DELETE： 当前用户删除一条状态
+        * MESSAGE： 与 MESSAGE 相关的所有类型的事件，即 `MESSAGE_CREATE` 与 `MESSAGE_DELETE` 的合事件。
+        * FRIENDS_CREATE：当前用户关注其他用户。source为当前用户，target为被关注的对象
+        * FRIENDS_DELETE： 当前用户取消关注其他用户
+        * FRIENDS_REQUEST： 当前用户对其他用户发起关注请求
+        * FRIENDS：FRIENDS 相关的所有类型的事件
+        * FAV_CREATE：当前用户收藏一条状态。 source 为发起收藏操作的用户，target为状态被收藏的用户，object为被收藏的状态
+        * FAV_DELETE：当前用户取消收藏一条状态
+        * FAV：FAV 相关的所有事件
+        * DM_CREATE： 用户收到一条私信
+        * USER_UPDATE_PROFILE：当前用户更新个人资料
+        * ALL：所有事件
 
-    USER_UPDATE_PROFILE：当前用户更新个人资料
     """
     HEART_BEAT = 0b000001_000
     ERROR = 0b000010_000
@@ -1006,14 +1013,14 @@ class Event:
 
 
 Listener = namedtuple('Listener', ['on', 'func', 'ttl'])
-"""监听器对象"""
+
 
 _EVENT_HEART_BEAT = Event(Event.HEART_BEAT, r'\r\n')
 
 
 class Stream:
     """
-
+    Streamming API, 实时监测用户动作
     """
 
     def __init__(self):
@@ -1021,11 +1028,11 @@ class Stream:
         self._listeners = []  # type:[Listener]
         self._lock = threading.Lock()
         self._running = True
-        self.init()
+        self._init()
 
-    def init(self):
+    def _init(self):
         """
-        开始建立连接
+        开始建立长连接
         """
         self._conn = _session.post('http://stream.fanfou.com/1/user.json', stream=True)
 
@@ -1095,8 +1102,9 @@ class Stream:
     def on(self, event, ttl=None):
         """
         作为装饰器使用，添加新的监听器
-        :param event: 监听的事件, 多个事件请用 | 连接。如 Event.MESSAGE | Event.FREIENDS
-        :param int ttl: 此监听器执行的次数，None表示不限次数
+
+        :param event: 监听的事件, 多个事件请用 | 连接。如 `Event.MESSAGE | Event.FREIENDS`
+        :param int ttl: 此监听器执行的次数，`None` 表示不限次数
         """
 
         def decorator(func):

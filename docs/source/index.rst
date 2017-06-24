@@ -11,6 +11,7 @@ van - Fanfou SDK for Human Documents
 
    intro
    explanation
+   streamming
    api
    todo
 

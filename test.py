@@ -8,9 +8,11 @@ import arrow
 from nose.tools import *
 
 try:
+    from fanfou_sdk import van
     from fanfou_sdk.van import Fan, Config, Status, User, Photo, Stream, Event
 except ImportError:
-    from van import Fan, Config, Status, User, Photo, Stream
+    import van
+    from van import Fan, Config, Status, User, Photo, Stream, Event
 
 ACCESS_TOKEN = {
     "oauth_token": os.environ.get('ACCESS_TOKEN'),
@@ -38,8 +40,8 @@ class TestAuth:
         self.cfg.auth_type = 'xauth'
         self.cfg.xauth_username = os.environ['XAUTH_USERNAME']
         self.cfg.xauth_password = os.environ['XAUTH_PASSWORD']
-        fan = Fan.get(cfg=self.cfg)
-        assert isinstance(fan._cfg.access_token, dict)
+        Fan.setup(cfg=self.cfg)
+        assert isinstance(van._cfg.access_token, dict)
 
 
 class TestConfig:
