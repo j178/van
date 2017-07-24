@@ -79,9 +79,11 @@ def _request(method, endpoint, **data):
     url = 'http://api.fanfou.com/{}.json'.format(endpoint)
     d = {{'GET': 'params', 'POST': 'data'}[method]: data}
 
+    sleep_time = 1
     timeout = _cfg.timeout
-    fail_sleep_time = _cfg.fail_sleep_time
-    for failure in range(3):
+    max_sleep = _cfg.max_sleep
+
+    while sleep_time < max_sleep:
         try:
             result = _session.request(method, url, **d, files=files, timeout=timeout)
             j = result.json()
@@ -90,12 +92,11 @@ def _request(method, endpoint, **data):
             _logger.error(j['error'])
             return False, j['error']
         except requests.RequestException as e:
-            _logger.error(e)
-            timeout += 2
-            fail_sleep_time += 2
-            if failure >= 2:
-                raise
-        time.sleep(fail_sleep_time)
+            _logger.exception('request failed')
+            if sleep_time < max_sleep / 2:
+                time.sleep(sleep_time)
+            sleep_time <<= 1
+    return False, 'request failed'
 
 
 _get = functools.partial(_request, 'GET')
@@ -156,10 +157,23 @@ class Base:
         if _:
             self.populate(rv)
 
+    def _pager(self, endpoint, **params):
+        page = 1
+        while True:
+            _, rv = _get(endpoint, page=page, **params)
+            if _:
+                if not rv:
+                    return
+                for r in rv:
+                    yield r
+                page += 1
+            else:
+                return
+
 
 class Timeline:
     """
-
+    时间线管理类
     """
 
     def __init__(self, user, endpoint):
@@ -170,7 +184,7 @@ class Timeline:
         self._max_id = None
         self._max_rawid = -1
         self._since_id = None
-        self._since_rawid = 999999999  # 什么时候饭否消息会达到这个数字呢？
+        self._since_rawid = 1 << 32  # 什么时候饭否消息会达到这个数字呢？
         self._curr = 0
 
     def tell(self):
@@ -214,25 +228,21 @@ class Timeline:
 
         if whence == 0:
             if offset < 0:
-                raise ValueError('offset should be zero or positive')
+                raise ValueError('offset should be zero or positive while whence=0')
             self._curr = min(offset, max(len(self._pool) - 1, 0))
         elif whence == 1:
             self._curr += offset
             self._curr = min(max(self._curr, 0), len(self._pool) - 1)
         else:
             if offset > 0:
-                old_len = len(self._pool)
-                while old_len + offset >= len(self._pool):
-                    if self._fetch_older() == 0:
-                        break
-                self._curr = min(old_len + offset, len(self._pool) - 1)
+                raise ValueError('offset should be zero or negative while whence=2')
             else:
                 self._curr = max(len(self._pool) + offset, 0)
         return self._curr
 
     def read(self, count=10):
         """
-        从当前游标位置处往后读取 `count` 条消息
+        从当前游标位置处往后读取 `count` 条消息, 数组长度可能小于要求的大小。
 
         :param int count: 读取数量
         :return: :class:`Status` 数组
@@ -242,7 +252,7 @@ class Timeline:
             if self._fetch_older() == 0:
                 break
         rv = self._pool[self._curr:self._curr + count]
-        self._curr += count
+        self._curr += len(rv)
         return rv
 
     def fetch(self, since_id=None, max_id=None, count=60):
@@ -295,7 +305,7 @@ class Timeline:
         while True:
             if self._curr >= len(self._pool):
                 if self._fetch_older() == 0:
-                    raise StopIteration
+                    return
             yield self._pool[self._curr]
             self._curr += 1
 
@@ -304,6 +314,9 @@ class Timeline:
 
 
 class User(Base):
+    """
+    用户类
+    """
     # 需要 id 参数，可查看其他用户信息的 API 在此类中（也可以省略 id 表示当前用户）
     endpiont = 'users/show'
     _object_buffer = {}  # 对象缓存
@@ -360,48 +373,46 @@ class User(Base):
             self.created_at = arrow.get(self.created_at, self._time_format)
 
     @property
-    def followers(self, count=100):
+    def followers(self, count=60):
         """
-        返回此用户的关注者(前100个)
+        返回此用户的关注者
+        此用户为当前用户的关注对象或未设置隐私
+
+        :param int count: 每次获取的数量
+        """
+        for fo in self._pager('statuses/followers', id=self.id, count=count):
+            yield User.get(data=fo)
+
+    @property
+    def followers_id(self, count=60):
+        """
+        返回此用户关注者的id列表
+
+        :param int count: 每次获取的数量
+        """
+        for fo in self._pager('followers/ids', id=self.id, count=count):
+            yield User.get(data=fo)
+
+    @property
+    def friends(self, count=60):
+        """
+        返回此用户的关注对象
         此用户为当前用户的关注对象或未设置隐私
         """
-        # count=100
-        _, rv = _get('statuses/followers', id=self.id, count=count)
-        if _:
-            rv = [User.get(data=f) for f in rv]
-        return _, rv
+        for fr in self._pager('statuses/friends', id=self.id, count=count):
+            yield User.get(data=fr)
 
     @property
-    def followers_id(self, count=None):
-        """返回此用户关注者的id列表"""
-        # count=1..60
-        return _get('followers/ids', id=self.id, count=count)
-
-    @property
-    def friends(self, count=100):
-        """
-        返回此用户的关注对象(前100个)
-        此用户为当前用户的关注对象或未设置隐私
-        """
-        # count=100
-        _, rv = _get('statuses/friends', id=self.id, count=count)
-        if _:
-            rv = [User.get(data=f) for f in rv]
-        return _, rv
-
-    @property
-    def friends_id(self, count=None):
+    def friends_id(self, count=60):
         """返回此用户关注对象的id列表"""
-        # count=1..60
-        return _get('friends/ids', id=self.id, count=count)
+        for fr in self._pager('friends/ids', id=self.id, count=count):
+            yield fr
 
     @property
-    def favorites(self, count=None):
+    def favorites(self, count=60):
         """浏览此用户收藏的消息"""
-        _, rv = _get('favorites/id', id=self.id, count=count)
-        if _:
-            rv = [Status.get(data=s) for s in rv]
-        return _, rv
+        for fo in self._pager('favorites/id', id=self.id, count=count):
+            yield Status.get(data=fo)
 
     def relationship(self, other):
         """
@@ -421,10 +432,16 @@ class User(Base):
     def __str__(self):
         return '<User ({}@{})>'.format(self.name, self.id)
 
+    def __hash__(self):
+        return hash(self.id)
+
     __repr__ = __str__
 
 
 class Status(Base):
+    """
+    消息类
+    """
     endpiont = 'statuses/show'
     _object_buffer = {}  # 对象缓存
 
@@ -596,7 +613,7 @@ class Config:
     access_token_url = 'http://fanfou.com/oauth/access_token'
     draft_box = []  # type:[Status]
     timeout = 5
-    fail_sleep_time = 3
+    max_sleep = 30
 
     def __init__(self):
         atexit.register(self.dump)
@@ -629,7 +646,7 @@ class Config:
                      'access_token_url',
                      'draft_box',
                      'timeout',
-                     'fail_sleep_time']
+                     'max_sleep']
             with open(self.save_path, 'w', encoding='utf8') as f:
                 config = {x: getattr(self, x) for x in attrs}
                 config['draft_box'] = self.save_draft_box()
@@ -650,7 +667,7 @@ class Config:
 
 class Fan(User):
     """
-    模拟
+    授权用户（可操作其数据）
     """
 
     def __init__(self, *, cfg, **kwargs):
@@ -678,9 +695,9 @@ class Fan(User):
         """
         global _session, _cfg
 
-        _cfg=_cfg = cfg
+        _cfg = cfg
         _session = OAuth1Session(cfg.consumer_key, cfg.consumer_secret)
-        if not cfg.access_token:
+        if not cfg.access_token or not cfg.access_token.get('oauth_token'):
             if cfg.auth_type == 'oauth':
                 cfg.access_token = cls._oauth(cfg)
             else:
@@ -796,15 +813,12 @@ class Fan(User):
             """Patch oauthlib.oauth1.Client for xauth"""
 
             def get_oauth_params(self, request):
-                params = super(OAuth1ClientPatch, self).get_oauth_params(
-                        request)
+                params = super(OAuth1ClientPatch, self).get_oauth_params(request)
                 params.extend(args)
                 return params
 
-        sess = OAuth1Session(cfg.consumer_key, cfg.consumer_secret,
-                             client_class=OAuth1ClientPatch)
-        access_token = sess.fetch_access_token(cfg.access_token_url,
-                                               verifier='123')
+        sess = OAuth1Session(cfg.consumer_key, cfg.consumer_secret, client_class=OAuth1ClientPatch)
+        access_token = sess.fetch_access_token(cfg.access_token_url, verifier='123')
         return access_token
 
     def update_status(self, text, photo=None, in_reply_to_user_id=None,
@@ -865,10 +879,8 @@ class Fan(User):
 
         :rtype: (bool, [User])
         """
-        _, rv = _get('friendships/requests', count=count)
-        if _:
-            rv = [User.get(data=b) for b in rv]
-        return _, rv
+        for fo in self._pager('friendships/requests', count=count):
+            yield User.get(data=fo)
 
     def accept_follower(self, user):
         """
@@ -936,10 +948,8 @@ class Fan(User):
 
         :rtype: (bool, [User])
         """
-        _, rv = _get('blocks/blocking')
-        if _:
-            rv = [User.get(data=b) for b in rv]
-        return _, rv
+        for bl in self._pager('blocks/blocking'):
+            yield User.get(data=bl)
 
     @property
     def blocked_users_id(self):
@@ -948,7 +958,8 @@ class Fan(User):
 
         :rtype: (bool, [str])
         """
-        return _get('blocks/ids')
+        for bl in self._pager('blocks/ids'):
+            yield bl
 
 
 class Event:
@@ -1012,21 +1023,27 @@ class Event:
         return '<Event {0.type} {0.source} {0.target} {0.object} {0.event} {0.created_at}>'.format(self)
 
 
-Listener = namedtuple('Listener', ['on', 'func', 'ttl'])
+class Listener:
+    def __init__(self, on, action, ttl=None):
+        self.on = on
+        self.action = action
+        self.ttl = ttl
 
 
 _EVENT_HEART_BEAT = Event(Event.HEART_BEAT, r'\r\n')
 
 
-class Stream:
+class Stream(threading.Thread):
     """
     Streamming API, 实时监测用户动作
     """
 
     def __init__(self):
+        super().__init__()
         self._conn = None
         self._listeners = []  # type:[Listener]
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        # self._counter = itertools.count()  # counter 记录监听器加入顺序
         self._running = True
         self._init()
 
@@ -1035,6 +1052,8 @@ class Stream:
         开始建立长连接
         """
         self._conn = _session.post('http://stream.fanfou.com/1/user.json', stream=True)
+        if self._conn.encoding is None:
+            self._conn.encoding = 'utf8'
 
     def stop(self):
         """
@@ -1046,41 +1065,37 @@ class Stream:
         """
         开始监听事件
         """
-
-        def go():
-            for chunk in self._conn.iter_content(chunk_size=None, decode_unicode=True):
-                evt = self._parse_chunk(chunk)
-                for func in self._pick_listeners(evt):
-                    try:
-                        func(evt)
-                    except Exception as e:
-                        _logger.error(e)
-                if not self._running:
-                    break
-            self._conn.close()
-
-        thread = threading.Thread(target=go)
-        thread.start()
-        return thread
+        for chunk in self._conn.iter_content(chunk_size=None, decode_unicode=True):
+            evt = self._parse_chunk(chunk)
+            for action in self._pick_listeners(evt):
+                try:
+                    action(evt)
+                except Exception as e:
+                    _logger.error(e)
+            if not self._running:
+                break
+        self._conn.close()
 
     def _pick_listeners(self, event):
         with self._lock:
+            # 将堆导出为一个有序的列表
+            # listeners = self._listeners[:]
+            # queue = list(map(heapq.heappop, [listeners] * len(listeners)))
+
             for lsn in self._listeners:
                 if lsn.on & event.type and (lsn.ttl is None or lsn.ttl > 0):
-                    yield lsn.func
+                    yield lsn.action
 
                     if lsn.ttl is not None:
                         lsn.ttl -= 1
 
     @staticmethod
-    def _parse_chunk(chunk: bytes):
-        if isinstance(chunk, bytes):
-            chunk = chunk.decode('utf8')
+    def _parse_chunk(chunk):
         if chunk == '\r\n':
             return _EVENT_HEART_BEAT
 
         try:
-            data = json.loads(chunk.strip())
+            data = json.loads(chunk)
         except json.JSONDecodeError as e:
             _logger.error(e)
             return Event(Event.ERROR, e)
@@ -1096,6 +1111,7 @@ class Stream:
         添加新的监听器
         :param Listener listener: Listener 对象
         """
+        # seq = next(self._counter)
         with self._lock:
             self._listeners.append(listener)
 
@@ -1104,6 +1120,7 @@ class Stream:
         作为装饰器使用，添加新的监听器
 
         :param event: 监听的事件, 多个事件请用 | 连接。如 `Event.MESSAGE | Event.FREIENDS`
+        :param int priority：监听器的优先级，数字越小优先级越高
         :param int ttl: 此监听器执行的次数，`None` 表示不限次数
         """
 

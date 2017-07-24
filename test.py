@@ -15,7 +15,7 @@ except ImportError:
     from van import Fan, Config, Status, User, Photo, Stream, Event
 
 ACCESS_TOKEN = {
-    "oauth_token": os.environ.get('ACCESS_TOKEN'),
+    "oauth_token"       : os.environ.get('ACCESS_TOKEN'),
     "oauth_token_secret": os.environ.get('ACCESS_TOKEN_SECRET')
 }
 
@@ -30,6 +30,15 @@ RAW_PHOTO = b'/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBA
 
 def random_str(length=10):
     return ''.join(random.choice(string.printable) for _ in range(length))
+
+
+def get_token():
+    username, password = os.environ['XAUTH_USERNAME'], os.environ['XAUTH_PASSWORD']
+    cfg = MyConfig()
+    cfg.xauth_username = username
+    cfg.xauth_password = password
+    Fan.setup(cfg)
+    print(cfg.access_token)
 
 
 class TestAuth:
@@ -64,8 +73,6 @@ class TestAPI:
     def setup(self):
         cfg = MyConfig()
         cfg.access_token = ACCESS_TOKEN
-        cfg.timeout = 10
-        cfg.fail_sleep_time = 10
 
         self.cfg = cfg
         self.me = Fan.get(cfg=cfg)  # type:Fan
@@ -139,8 +146,18 @@ class TestTimeline:
         self.me = Fan.get(cfg=cfg)  # type:Fan
         self.tl = self.me.timeline
 
-    def test_access(self):
-        self.tl.read()
+    def test_read(self):
+        r = self.tl.read(10)
+        assert_equal(len(r), 10)
+        assert_equal(self.tl.tell(), 10)
+        self.tl.read(10)
+        assert_equal(self.tl.tell(), 20)
+        ori_ptr = self.tl.tell()
+        r = self.tl.read(1 << 32)
+        assert_equal(self.tl.tell(), ori_ptr + len(r))
+        r = self.tl.read()
+        assert_equal(len(r), 0)
+
         self.me.statues.read()
         self.me.replies.read()
         self.me.mentions.read()
@@ -172,8 +189,8 @@ class TestTimeline:
         assert_equal(tl.seek(1000, 1), len(tl) - 1)
 
         tl.rewind()
-        assert_equal(tl.seek(1000, 2), len(tl) - 1)
         assert_equal(tl.seek(-1000, 2), 0)
+        assert_raises(ValueError, tl.seek, (1, 2))
 
 
 class TestStream:
@@ -182,21 +199,24 @@ class TestStream:
         cfg.access_token = ACCESS_TOKEN
         Fan.setup(cfg)
         self.s = Stream()
-        self.thread = self.s.run()
+        self.s.start()
+        self.i = 0
 
     def teardown(self):
+        self.s.join(10)
         self.s.stop()
 
     def test_api(self):
-        @self.s.on(Event.ALL)
-        def listener(evt):
-            print(evt)
+        @self.s.on(Event.ALL, ttl=3)
+        def test_ttl(evt):
+            self.i += 1
+            assert_less_equal(self.i, 3)
 
         assert_equal(len(self.s._listeners), 1)
 
-        @self.s.on(Event.MESSAGE | Event.FAV, ttl=3)
-        def _(evt):
-            print(evt)
+        @self.s.on(Event.MESSAGE | Event.FAV)
+        def test_combined_events(evt):
+            assert_in(evt.type, [Event.MESSAGE, Event.FAV])
 
         assert_equal(len(self.s._listeners), 2)
 
@@ -204,3 +224,7 @@ class TestStream:
         def _(evt):
             assert_is_instance(evt, Event)
             assert_equal(evt.object, r'\r\n')
+
+
+if __name__ == '__main__':
+    get_token()

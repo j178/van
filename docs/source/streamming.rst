@@ -18,5 +18,13 @@ Demo
     def handle_message(event):
         print(event.object.text)
 
-    thread = s.run()
-    thread.join()
+    @s.on(Event.USER | Event.MESSAGE_CREATE)
+    def handle_something(event):
+        do_something(event)
+
+    @s.on(Event.ALL)
+    def handle_all(event):
+        print(event.object)
+
+    if __name__ == '__main__':
+        s.start()
