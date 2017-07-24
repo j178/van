@@ -14,11 +14,6 @@ except ImportError:
     import van
     from van import Fan, Config, Status, User, Photo, Stream, Event
 
-ACCESS_TOKEN = {
-    "oauth_token"       : os.environ.get('ACCESS_TOKEN'),
-    "oauth_token_secret": os.environ.get('ACCESS_TOKEN_SECRET')
-}
-
 
 class MyConfig(Config):
     consumer_key = 'b55d535f350dcc59c3f10e9cf43c1749'
@@ -29,16 +24,18 @@ RAW_PHOTO = b'/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBA
 
 
 def random_str(length=10):
-    return ''.join(random.choice(string.printable) for _ in range(length))
+    return ''.join(random.choice(string.ascii_letters) for _ in range(length))
 
 
-def get_token():
-    username, password = os.environ['XAUTH_USERNAME'], os.environ['XAUTH_PASSWORD']
+def auth():
+    username = os.environ['XAUTH_USERNAME']
+    password = os.environ['XAUTH_PASSWORD']
     cfg = MyConfig()
+    cfg.auth_type = 'xauth'
     cfg.xauth_username = username
     cfg.xauth_password = password
     Fan.setup(cfg)
-    print(cfg.access_token)
+    return cfg
 
 
 class TestAuth:
@@ -71,10 +68,7 @@ class TestConfig:
 
 class TestAPI:
     def setup(self):
-        cfg = MyConfig()
-        cfg.access_token = ACCESS_TOKEN
-
-        self.cfg = cfg
+        cfg = auth()
         self.me = Fan.get(cfg=cfg)  # type:Fan
 
     def test_user_api(self):
@@ -137,12 +131,7 @@ class TestAPI:
 
 class TestTimeline:
     def setup(self):
-        cfg = MyConfig()
-        cfg.access_token = ACCESS_TOKEN
-        cfg.timeout = 10
-        cfg.fail_sleep_time = 10
-
-        self.cfg = cfg
+        cfg = auth()
         self.me = Fan.get(cfg=cfg)  # type:Fan
         self.tl = self.me.timeline
 
@@ -190,14 +179,12 @@ class TestTimeline:
 
         tl.rewind()
         assert_equal(tl.seek(-1000, 2), 0)
-        assert_raises(ValueError, tl.seek, (1, 2))
+        assert_raises(ValueError, tl.seek, 1, 2)
 
 
 class TestStream:
     def setup(self):
-        cfg = MyConfig()
-        cfg.access_token = ACCESS_TOKEN
-        Fan.setup(cfg)
+        auth()
         self.s = Stream()
         self.s.start()
         self.i = 0
@@ -224,7 +211,3 @@ class TestStream:
         def _(evt):
             assert_is_instance(evt, Event)
             assert_equal(evt.object, r'\r\n')
-
-
-if __name__ == '__main__':
-    get_token()

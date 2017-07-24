@@ -669,6 +669,7 @@ class Fan(User):
     """
     授权用户（可操作其数据）
     """
+    cfg = None
 
     def __init__(self, *, cfg, **kwargs):
         """
@@ -695,7 +696,7 @@ class Fan(User):
         """
         global _session, _cfg
 
-        _cfg = cfg
+        cls.cfg = _cfg = cfg
         _session = OAuth1Session(cfg.consumer_key, cfg.consumer_secret)
         if not cfg.access_token or not cfg.access_token.get('oauth_token'):
             if cfg.auth_type == 'oauth':
