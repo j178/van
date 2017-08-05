@@ -403,11 +403,6 @@ class Base:
     attrs = ('id',)
 
     def __init__(self, fan, **kwargs):
-        # 构造函数的三种使用方式：
-        # 1. User.get(id='') 由id获取对象
-        # 2. User.get(data=rv) 由API返回的字典构造对象
-        # 3. Status(text='abc') 提供一些参数构造一个不完全的对象(一般是没有ID)，API调用之后用返回结果补完
-        # 4. User.get(master=True) 作为主人的特殊待遇
         self.fan = fan  # type: Fan
         self.dict = kwargs  # type: dict
 
