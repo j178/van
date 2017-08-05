@@ -125,10 +125,10 @@ class TestTimeline:
         # r = self.tl.read()
         # assert_equal(len(r), 0)
 
-        self.me.statues.read()
-        self.fan.replies.read()
-        self.fan.mentions.read()
-        self.fan.public_timeline.read()
+        # self.me.statues.read()
+        # self.fan.replies.read()
+        # self.fan.mentions.read()
+        # self.fan.public_timeline.read()
 
     def test_call(self):
         tl = self.tl
