@@ -11,27 +11,16 @@ import logging
 import os
 import pickle
 import re
-import sys
 import threading
-import time
-from collections import namedtuple
 from urllib.parse import urlparse
 
 import arrow
 import requests
-from requests_oauthlib.oauth1_session import OAuth1Session, TokenRequestDenied
+from requests_oauthlib.oauth1_session import OAuth1Session
 
 __version__ = '0.0.4'
-__all__ = ['Fan', 'User', 'Status', 'Timeline', 'Config']
-
-_session = None  # type: OAuth1Session
-_cfg = None  # type: Config
-_logger = logging.getLogger(__name__)
-
-
-class AuthFailed(Exception):
-    def __init__(self, msg):
-        self.msg = msg
+__all__ = ['Fan', 'User', 'Status', 'Timeline']
+logger = logging.getLogger(__name__)
 
 
 def get_input(prompt=None):
@@ -53,6 +42,7 @@ def get_photo(p):
                 resp = requests.get(url, stream=True)
                 resp.raise_for_status()
                 if not resp.headers.get('Content-Type', '').lower().startswith('image/'):
+                    resp.close()
                     return False
                 return resp.raw
         except requests.RequestException:
@@ -60,47 +50,351 @@ def get_photo(p):
     return False
 
 
-Photo = namedtuple('Photo', ['url', 'largeurl', 'imageurl', 'thumburl', 'originurl', 'type'])
+def pager(fan, endpoint, **params):
+    page = 1
+    while True:
+        _, rv = fan.get(endpoint, page=page, **params)
+        if _:
+            if not rv:
+                return
+            for r in rv:
+                yield r
+            page += 1
+        else:
+            return
 
 
-def _request(method, endpoint, **data):
-    # 1-tuple (not a tuple at all)
-    # {fieldname: file_object}
-    # 2-tuple
-    # {fieldname: (filename, file_object)}
-    # 3-tuple
-    # {fieldname: (filename, file_object, content_type)}
-    # 4-tuple
-    # {fieldname: (filename, file_object, content_type, headers)}
-    data.setdefault('mode', 'lite')
-    data.setdefault('format', 'html')
-    files = data.pop('files', None)
+def log(func):
+    logger = logging.getLogger(func.__module__)
 
-    url = 'http://api.fanfou.com/{}.json'.format(endpoint)
-    d = {{'GET': 'params', 'POST': 'data'}[method]: data}
+    @functools.wraps(func)
+    def decorator(self, *args, **kwargs):
+        logger.debug('Entering: %s', func.__name__)
+        result = func(self, *args, **kwargs)
+        logger.debug(result)
+        logger.debug('Exiting: %s', func.__name__)
+        return result
 
-    sleep_time = 1
-    timeout = _cfg.timeout
-    max_sleep = _cfg.max_sleep
+    return decorator
 
-    while sleep_time < max_sleep:
+
+class FanfouError(Exception):
+    """所有异常的基类"""
+
+
+class NetworkError(FanfouError):
+    """真实的网络错误：DNS解析出错，拒绝连接等"""
+
+
+class Timeout(NetworkError):
+    pass
+
+
+class ApiRequestError(FanfouError):
+    """API请求出错，参数错误、验证失败等"""
+
+
+class AuthError(ApiRequestError):
+    pass
+
+
+class Fan:
+    """
+    API操作入口
+    """
+
+    def __init__(self, consumer_key, consumer_secret, oauth_token=None, mobile=False):
+        self._consumer_key = consumer_key
+        self._consumer_secret = consumer_secret
+        self._oauth_token = oauth_token
+        self._session = OAuth1Session(consumer_key, consumer_secret)
+        if oauth_token:
+            self._session._populate_attributes(oauth_token)
+        self._oauth_type = None
+
+        self.request_token_url = 'http://fanfou.com/oauth/request_token'
+        self.authorize_url = 'http://fanfou.com/oauth/authorize'
+        self.access_token_url = 'http://fanfou.com/oauth/access_token'
+        if mobile:
+            self.authorize_url = 'http://m.fanfou.com/oauth/authorize'
+
+        self._me = None
+        self.draft_box = []
+        self.mentions = Timeline(self, None, 'statuses/mentions')
+        self.replies = Timeline(self, None, 'statuses/replies')
+        self.public_timeline = Timeline(self, None, 'statuses/public_timeline')
+
+    @property
+    def session(self):
+        """获取session"""
+        return self._session
+
+    def authorization_url(self, oauth_callback='oob'):
+        """
+        引导用户访问的授权页面URL
+        当 oauth_callback = 'oob' 时表示使用 PIN码授权
+        """
+        self._oauth_type = oauth_callback
+        self._session.fetch_request_token(self.request_token_url)
+        url = self._session.authorization_url(self.authorize_url, oauth_callback=oauth_callback)
+        return url
+
+    def oauth(self, pin_code=None, redirect_url=None):
+        """通过授权后的PIN码或者浏览器重定向的URL获取最终的token"""
+        if pin_code and redirect_url:
+            raise ValueError('pin_code and redirect_url are mutually exclusive')
+        if pin_code:
+            token = self._session.fetch_access_token(self.access_token_url, verifier=pin_code)
+        elif redirect_url:
+            self._session.parse_authorization_response(redirect_url)
+            token = self._session.fetch_access_token(self.access_token_url, verifier='x')
+        else:
+            raise ValueError('Either pin_code nor redirect_url is valid')
+        self._oauth_token = token
+        self._session._populate_attributes(token)
+        return token
+
+    def xauth(self, username, password):
+        import oauthlib.oauth1.rfc5849.utils
+        # patch to allow x_auth_* params
+        oauthlib.oauth1.rfc5849.utils.filter_oauth_params = lambda _: _
+
+        client = self._session._client.client
+
+        class OAuth1Client(oauthlib.oauth1.rfc5849.Client):
+            def get_oauth_params(self, request):
+                params = super().get_oauth_params(request)
+                args = [
+                    ('x_auth_username', username),
+                    ('x_auth_password', password),
+                    ('x_auth_mode', 'client_auth')
+                ]
+                params += args
+                return params
+
+        sess = OAuth1Session(client.client_key, client.client_secret, client_class=OAuth1Client)
+        token = sess.fetch_access_token(self.access_token_url, verifier='x')
+        self._oauth_token = token
+        self._session._populate_attributes(token)
+        return token
+
+    @property
+    def authorized(self):
+        """当前会话是否已授权"""
+        return self._session.authorized
+
+    def request(self, method, endpoint, params=None, data=None, files=None, **kwargs):
+        """发出请求"""
+        # 1-tuple (not a tuple at all)
+        # {fieldname: file_object}
+        # 2-tuple
+        # {fieldname: (filename, file_object)}
+        # 3-tuple
+        # {fieldname: (filename, file_object, content_type)}
+        # 4-tuple
+        # {fieldname: (filename, file_object, content_type, headers)}
+        kwargs.setdefault('timeout', (5, 5))
+        url = 'http://api.fanfou.com/{}.json'.format(endpoint)
+
         try:
-            result = _session.request(method, url, **d, files=files, timeout=timeout)
-            j = result.json()
-            if result.status_code == 200:
-                return True, j
-            _logger.error(j['error'])
-            return False, j['error']
-        except requests.RequestException as e:
-            _logger.exception('request failed')
-            if sleep_time < max_sleep / 2:
-                time.sleep(sleep_time)
-            sleep_time <<= 1
-    return False, 'request failed'
+            response = self._session.request(method, url, params=params, data=data, files=files, **kwargs)
+        except requests.Timeout:
+            raise Timeout
+        except requests.ConnectionError:
+            raise NetworkError
+        else:
+            try:
+                json_data = response.json()
+            except ValueError:
+                raise ApiRequestError('Invalid server response')
+            if response.status_code == 200:
+                return json_data
+            if json_data.get('error'):
+                raise ApiRequestError(json_data['error'])
+            raise ApiRequestError('Invalid error response')
 
+    def get(self, endpoint, **params):
+        params.setdefault('mode', 'lite')
+        params.setdefault('format', 'html')
+        return self.request('GET', endpoint, params=params)
 
-_get = functools.partial(_request, 'GET')
-_post = functools.partial(_request, 'POST')
+    def post(self, endpoint, files=None, **data):
+        data.setdefault('mode', 'lite')
+        data.setdefault('format', 'html')
+        return self.request('POST', endpoint, data=data, files=files)
+
+    @property
+    def me(self):
+        """获取授权用户的信息"""
+        if self._me is None:
+            me = User.from_id(self)
+            me.mentions = self.mentions
+            me.replies = self.replies
+            self._me = me
+        return self._me
+
+    @log
+    def update_status(self, status, photo=None,
+                      in_reply_to_user_id=None,
+                      in_reply_to_status_id=None,
+                      repost_status_id=None,
+                      location=None,
+                      source=None):
+        """
+        发表新状态，:meth:`Status.send()` 的快捷方式。
+
+        :param str text: 文字
+        :param str photo: 照片路径或者URL
+        :param str in_reply_to_user_id: 要回复的用户ID
+        :param str in_reply_to_status_id: 要回复的消息ID
+        :param str repost_status_id: 要转发的消息ID
+        :param str location: 位置信息，使用'地点名称' 或 '一个半角逗号分隔的经纬度坐标'
+        :param str source: source 消息来源
+        """
+        data = dict(status=status,
+                    in_reply_to_user_id=in_reply_to_user_id,
+                    in_reply_to_status_id=in_reply_to_status_id,
+                    repost_status_id=repost_status_id,
+                    locaion=location, source=source)
+        try:
+            if photo is not None:
+                result = self.post('photos/upload', files=dict(photo=photo), **data)
+            else:
+                result = self.post('statuses/update', **data)
+        except FanfouError:
+            data['photo'] = photo
+            self.draft_box.append(data)
+            raise
+
+        return Status.from_json(self, result)
+
+    def resend_draft_box(self):
+        pass
+
+    # 以下是不需要 id 参数，即只能获取当前用户信息的API
+    @log
+    def follow(self, user):
+        """
+        关注用户
+
+        :param User|str user: 被关注的用户, User对象，或id，或 loginname
+        """
+        if isinstance(user, User):
+            user = user.id
+        rs = self.post('friendships/create', id=user)
+        return rs
+
+    @log
+    def unfollow(self, user):
+        """
+        取消关注用户
+
+        :param User|str user: 被关注的用户, User对象，或id，或 loginname
+        """
+        if isinstance(user, User):
+            user = user.id
+        rs = self.post('friendships/destroy', id=user)
+        return rs
+
+    @property
+    @log
+    def follow_requests(self, count=60):
+        """
+        返回请求关注当前用户的列表
+
+        :rtype: (bool, [User])
+        """
+        for fo in pager(self, 'friendships/requests', count=count):
+            yield User.from_json(self, fo)
+
+    @log
+    def accept_follower(self, user):
+        """
+        接受关注请求
+
+        :param User|str user: User对象，或id，或 loginname
+        :rtype: (bool, User)
+        """
+        if isinstance(user, User):
+            user = user.id
+        rv = self.get('friendships/accept', id=user)
+        return rv
+
+    @log
+    def deny_follower(self, user):
+        """
+        拒绝关注请求
+
+        :param User|str user: User对象，或id，或 loginname
+        :rtype: (bool, User)
+        """
+        if isinstance(user, User):
+            user = user.id
+        rv = self.post('friendships/deny', id=user)
+        return rv
+
+    @log
+    def block(self, user):
+        """
+        屏蔽用户
+
+        :param str|User user: 被屏蔽的用户User对象或者id，loginname
+        :rtype: (bool, User)
+        """
+        if isinstance(user, User):
+            user = user.id
+        rs = self.post('blocks/create', id=user)
+        return rs
+
+    @log
+    def unblock(self, user):
+        """
+        解除屏蔽
+
+        :param str|User user: 被屏蔽的用户User对象或者id，loginname
+        :rtype: (bool, str)
+        """
+        if isinstance(user, User):
+            user = user.id
+        rs = self.post('blocks/destroy', id=user)
+        return rs
+
+    def is_blocked(self, user):
+        """
+        检查是否屏蔽用户
+
+        :param str|User user: 用户User对象或者id，loginname
+        :rtype: (bool, str)
+        """
+        if isinstance(user, User):
+            user = user.id
+        return self.get('blocks/exists', id=user)
+
+    @property
+    def blocked_users(self):
+        """
+        返回黑名单上用户列表
+
+        :rtype: (bool, [User])
+        """
+        for bl in pager(self, 'blocks/blocking'):
+            yield User.from_json(self, bl)
+
+    @property
+    @log
+    def blocked_users_id(self):
+        """
+        获取用户黑名单id列表
+
+        :rtype: (bool, [str])
+        """
+        for bl in pager(self, 'blocks/ids'):
+            yield bl
+
+    @property
+    @log
+    def trends(self):
+        return self.get('trends/list')
 
 
 class Base:
@@ -109,66 +403,41 @@ class Base:
     为子类提供对象缓存和自动加载功能。
     """
     endpiont = None
-    _object_buffer = {}  # 对象缓存
-    _time_format = 'ddd MMM DD HH:mm:ss Z YYYY'
+    attrs = ('id',)
 
-    def __init__(self, *, id=None, data=None, **kwargs):
+    def __init__(self, fan, **kwargs):
         # 构造函数的三种使用方式：
         # 1. User.get(id='') 由id获取对象
         # 2. User.get(data=rv) 由API返回的字典构造对象
         # 3. Status(text='abc') 提供一些参数构造一个不完全的对象(一般是没有ID)，API调用之后用返回结果补完
         # 4. User.get(master=True) 作为主人的特殊待遇
-        self.id = id
+        self.fan = fan  # type: Fan
+        self.dict = kwargs  # type: dict
 
-        # 对 master 特殊对待
-        if (id and not data and not kwargs) or kwargs.pop('master', None):
-            self.fill()
-        elif data:
-            self.populate(data)
-        elif kwargs:
-            self.populate(kwargs)
-        else:
-            raise ValueError('One of id and data is required')
+    def __getattr__(self, item):
+        if item in self.attrs:
+            if item not in self.dict:
+                id = self.dict.get('id')
+                result = self.fan.get(self.endpiont, id=id)
+                self.dict.update(result.copy())
+            return self.dict.get(item)
+        raise AttributeError
 
     @classmethod
-    def get(cls, *, id=None, data=None, **kwargs):
-        """
-        获取一个对象
+    def from_json(cls, fan, data):
+        if not data:
+            return None
 
-        :param str id: 对象 ID
-        :param dict data: 由字典构造对象
-        :rtype: cls
-        """
-        # make sure every object only has one instance
-        id = id or (data.get('id') if data else id)
-        if id not in cls._object_buffer:
-            o = cls(id=id, data=data, **kwargs)
-            cls._object_buffer[o.id] = o
-            return o
-        return cls._object_buffer[id]
+        data = data.copy()
+        return cls(fan, **data)
 
-    def populate(self, data):
-        """用API返回的字典填充此对象"""
-        raise NotImplementedError
+    @classmethod
+    def from_id(cls, fan, id=None):
+        result = fan.get(cls.endpiont, id=id)
+        return cls.from_json(fan, result)
 
-    def fill(self):
-        """调用API填充此对象"""
-        _, rv = _get(self.endpiont, id=self.id)
-        if _:
-            self.populate(rv)
-
-    def _pager(self, endpoint, **params):
-        page = 1
-        while True:
-            _, rv = _get(endpoint, page=page, **params)
-            if _:
-                if not rv:
-                    return
-                for r in rv:
-                    yield r
-                page += 1
-            else:
-                return
+    def to_dict(self):
+        return self.dict
 
 
 class Timeline:
@@ -176,8 +445,9 @@ class Timeline:
     时间线管理类
     """
 
-    def __init__(self, user, endpoint):
-        self.user = user
+    def __init__(self, fan, user_id, endpoint):
+        self.fan = fan
+        self.user_id = user_id  # type:User
         """:class:`~van.User` 时间线的主人"""
         self.endpoint = endpoint
         self._pool = []  # type: [Status]
@@ -266,15 +536,13 @@ class Timeline:
         :return: :class:`Status` 数组
         :rtype: [Status]
         """
-        _, rv = _get(self.endpoint, id=self.user.id,
-                     since_id=since_id, max_id=max_id, count=count)
-        if _:
-            rv = [Status.get(data=s) for s in rv]
-        return _, rv
+        rv = self.fan.get(self.endpoint, id=self.user_id,
+                          since_id=since_id, max_id=max_id, count=count)
+        return [Status.from_json(self.fan, s) for s in rv]
 
     def _fetch_older(self):
-        _, rv = self.fetch(max_id=self._since_id)
-        if _ and rv:
+        rv = self.fetch(max_id=self._since_id)
+        if rv:
             self._since_id = rv[-1].id
             self._since_rawid = rv[-1].rawid
             if rv[0].rawid > self._max_rawid:
@@ -285,8 +553,8 @@ class Timeline:
         return 0
 
     def _fetch_newer(self):
-        _, rv = self.fetch(since_id=self._max_id)
-        if _ and rv:
+        rv = self.fetch(since_id=self._max_id)
+        if rv:
             self._max_id = rv[0].id
             self._max_rawid = rv[0].rawid
             if rv[0].rawid < self._since_rawid:
@@ -319,9 +587,12 @@ class User(Base):
     """
     # 需要 id 参数，可查看其他用户信息的 API 在此类中（也可以省略 id 表示当前用户）
     endpiont = 'users/show'
-    _object_buffer = {}  # 对象缓存
+    attrs = ('id', 'unique_id', 'name', 'screen_name', 'location', 'gender', 'birthday',
+             'description', 'url', 'protected', 'followers_count', 'friends_count', 'favourites_count',
+             'statuses_count', 'photo_count', 'following', 'notifications', 'created_at', 'utc_offset',
+             'profile_image_url', 'profile_image_url_large')
 
-    def __init__(self, *, id=None, data=None, **kwargs):
+    def __init__(self, fan, **kwargs):
         """
         :param str id: 用户ID
         :param str name: 用户名字
@@ -341,36 +612,12 @@ class User(Base):
         :param str created_at: 用户注册时间
         :param int utc_offset: UTC offset
         """
-        self.timeline = Timeline(self, 'statuses/home_timeline')  # 返回此用户看到的时间线
-        self.statues = Timeline(self, 'statuses/user_timeline')  # 返回此用户已发送的消息
-        self.photos = Timeline(self, 'photos/user_timeline')  # 浏览指定用户的图片
+        super().__init__(fan, **kwargs)
+        self.created_at = arrow.get(self.dict['created_at'], 'ddd MMM DD HH:mm:ss Z YYYY')
 
-        super(User, self).__init__(id=id, data=data, **kwargs)
-
-    def populate(self, data):
-        self.id = data.get('id')
-        self.unique_id = data.get('unique_id')
-        self.name = data.get('name')
-        self.screen_name = data.get('screen_name')
-        self.location = data.get('location')
-        self.gender = data.get('gender')
-        self.birthday = data.get('birthday')
-        self.description = data.get(' description')
-        self.url = data.get('url')
-        self.protected = data.get('protected')
-        self.followers_count = data.get('followers_count')
-        self.friends_count = data.get('friends_count')
-        self.favourites_count = data.get('favourites_count')
-        self.statuses_count = data.get('statuses_count')
-        self.photo_count = data.get('photo_count')
-        self.following = data.get('following')
-        self.notifications = data.get('notifications')
-        self.created_at = data.get('created_at')
-        self.utc_offset = data.get('utc_offset')
-        self.profile_image_url = data.get('profile_image_url')
-        self.profile_image_url_large = data.get('profile_image_url')
-        if self.created_at:
-            self.created_at = arrow.get(self.created_at, self._time_format)
+        self.timeline = Timeline(self.fan, self.id, 'statuses/home_timeline')  # 返回此用户看到的时间线
+        self.statues = Timeline(self.fan, self.id, 'statuses/user_timeline')  # 返回此用户已发送的消息
+        self.photos = Timeline(self.fan, self.id, 'photos/user_timeline')  # 浏览指定用户的图片
 
     @property
     def followers(self, count=60):
@@ -380,8 +627,8 @@ class User(Base):
 
         :param int count: 每次获取的数量
         """
-        for fo in self._pager('statuses/followers', id=self.id, count=count):
-            yield User.get(data=fo)
+        for fo in pager(self.fan, 'statuses/followers', id=self.id, count=count):
+            yield User.from_json(self.fan, fo)
 
     @property
     def followers_id(self, count=60):
@@ -390,8 +637,8 @@ class User(Base):
 
         :param int count: 每次获取的数量
         """
-        for fo in self._pager('followers/ids', id=self.id, count=count):
-            yield User.get(data=fo)
+        for fo in pager(self.fan, 'followers/ids', id=self.id, count=count):
+            yield fo
 
     @property
     def friends(self, count=60):
@@ -399,20 +646,20 @@ class User(Base):
         返回此用户的关注对象
         此用户为当前用户的关注对象或未设置隐私
         """
-        for fr in self._pager('statuses/friends', id=self.id, count=count):
-            yield User.get(data=fr)
+        for fr in pager(self.fan, 'statuses/friends', id=self.id, count=count):
+            yield User.from_json(self.fan, fr)
 
     @property
     def friends_id(self, count=60):
         """返回此用户关注对象的id列表"""
-        for fr in self._pager('friends/ids', id=self.id, count=count):
+        for fr in pager(self.fan, 'friends/ids', id=self.id, count=count):
             yield fr
 
     @property
     def favorites(self, count=60):
         """浏览此用户收藏的消息"""
-        for fo in self._pager('favorites/id', id=self.id, count=count):
-            yield Status.get(data=fo)
+        for fo in pager(self.fan, 'favorites/id', id=self.id, count=count):
+            yield Status.from_json(self.fan, fo)
 
     def relationship(self, other):
         """
@@ -423,11 +670,10 @@ class User(Base):
         """
         if isinstance(other, User):
             other = other.id
-        _, rv = _get('friendships/show', source_id=self.id, target_id=other)
-        if _:
-            source = rv['relationship']['source']
-            rv = (source['blocking'] == 'true', source['following'] == 'true', source['followed_by'] == 'true')
-        return _, rv
+        rv = self.fan.get('friendships/show', source_id=self.id, target_id=other)
+        source = rv['relationship']['source']
+        rv = (source['blocking'] == 'true', source['following'] == 'true', source['followed_by'] == 'true')
+        return rv
 
     def __str__(self):
         return '<User ({}@{})>'.format(self.name, self.id)
@@ -438,18 +684,50 @@ class User(Base):
     __repr__ = __str__
 
 
+class Photo:
+    def __init__(self, photo_url):
+        self.photo_url = photo_url
+        self.url = self.get(photo_url)
+
+    @staticmethod
+    def encode_params(params):
+        pass
+
+    def get(self, width=None, height=None, edge=None,
+            larger=None, percentage=None, background_color=None):
+        """
+        图片处理服务
+        :param width: 1-4096 指定目标缩略图的宽度
+        :param height: 1-4096 指定目标缩略图的高度
+        :param edge: 0/1/2/4，默认值为0 缩略优先边。0代表长边优先；1代表短边优先；2代表强制缩略；4代表短边优先缩略后填充
+        :param larger: 0/1，默认值为0 目标缩略图大于原图是否处理。0代表处理；1代表不处理
+        :param percentage: 1-1000 倍数百分比。100为原图；大于100为放大；小于100为缩小
+        :param background_color: red, green, blue[0-255] 填充部分的背景色。默认不指定（白色填充）。例如：100-100-100bgc
+        :return: 图片URL
+        """
+        if isinstance(background_color, (list, tuple)):
+            pass
+        params = {
+            'w': width,
+            'h': height,
+            'e': edge,
+            'l': larger,
+            'p': percentage,
+            'bgc': background_color
+        }
+        return self.encode_params(params)
+
+
 class Status(Base):
     """
     消息类
     """
     endpiont = 'statuses/show'
-    _object_buffer = {}  # 对象缓存
+    attrs = ('id', 'text', 'photo', 'created_at', 'in_reply_to_user_id', 'in_reply_to_status_id',
+             'in_reply_to_screen_name', 'repost_status_id', 'repost_status', 'repost_user_id',
+             'repost_screen_name', 'favorited', 'rawid', 'source', 'truncated', 'is_self', 'location')
 
-    _at_re = re.compile(r'@<a.*?>(.*?)</a>', re.I)
-    _topic_re = re.compile(r'#<a.*?>(.*?)</a>#', re.I)
-    _link_re = re.compile(r'<a.*?rel="nofollow" target="_blank">(.*)</a>', re.I)
-
-    def __init__(self, *, id=None, data=None, **kwargs):
+    def __init__(self, fan, **kwargs):
         """
         :param str text: 消息内容
         :param str id: status id
@@ -458,509 +736,94 @@ class Status(Base):
         :param Status|dict repost_status: 被转发消息的详细信息
         :param User|dict user: 消息的主人
         """
-        super(Status, self).__init__(id=id, data=data, **kwargs)
+        super().__init__(fan, **kwargs)
 
-    def populate(self, d):
-        self.id = d.get('id')
-        self.text = d.get('text')
-        self.photo = d.get('photo')
-        self.user = d.get('user')
-        self.created_at = d.get('created_at')
-        self.in_reply_to_user_id = d.get('in_reply_to_user_id')
-        self.in_reply_to_status_id = d.get('in_reply_to_status_id')
-        self.in_reply_to_screen_name = d.get('in_reply_to_screen_name')
-        self.repost_status_id = d.get('repost_status_id')
-        self.repost_status = d.get('repost_status')
-        self.repost_user_id = d.get('repost_user_id')
-        self.repost_screen_name = d.get('repost_screen_name')
-        self.favorited = d.get('favorited')
-        self.rawid = d.get('rawid')
-        self.source = d.get('source')
-        self.truncated = d.get('truncated')
-        self.is_self = d.get('is_self')
-        self.location = d.get('location')
-        if self.user and isinstance(self.user, dict):
-            self.user = User.get(data=self.user)
-        if self.repost_status and isinstance(self.repost_status, dict):
-            self.repost_status = Status.get(data=self.repost_status)
-        if self.created_at:
-            self.created_at = arrow.get(self.created_at, self._time_format)
-        # process photo dict
-        if isinstance(self.photo, dict):
-            p = self.photo
-            originurl = re.sub(r'@.+\..+$', '', p['largeurl'])
-            type = re.match(r'^.+\.(.+)$', originurl).group(1)
-            p['originurl'] = originurl
-            p['type'] = type
-            self.photo = Photo(**p)
+        self.user = User.from_json(fan, self.dict['user'])  # type:User
+        self.created_at = arrow.get(self.dict['created_at'], 'ddd MMM DD HH:mm:ss Z YYYY')
+        if self.repost_status:
+            self.repost_status = Status.from_json(fan, self.dict['repost_status'])
+        if self.photo:
+            self.photo = Photo(self.dict['photo']['imageurl'])
 
-        return self
+    @staticmethod
+    def process_text(text):
+        at_re = re.compile(r'@<a.*?>(.*?)</a>', re.I)
+        topic_re = re.compile(r'#<a.*?>(.*?)</a>#', re.I)
+        link_re = re.compile(r'<a.*?rel="nofollow" target="_blank">(.*)</a>', re.I)
 
-    @classmethod
-    def process_text(cls, text):
-        text = cls._at_re.sub(r'@\1', text)
-        text = cls._topic_re.sub(r'#\1#', text)
-        text = cls._link_re.sub(r'\1', text)
+        text = at_re.sub(r'@\1', text)
+        text = topic_re.sub(r'#\1#', text)
+        text = link_re.sub(r'\1', text)
         return text
 
-    def send(self):
-        """
-        Send self
-        :return 发送状态
-        :rtype (bool, Status|str)
-        """
-        photo = get_photo(self.photo)
-        text = self.process_text(self.text)
-        if photo:
-            _, rs = _post('photos/upload', status=text, files=dict(photo=photo),
-                          in_reply_to_user_id=self.in_reply_to_user_id,
-                          in_reply_to_status_id=self.in_reply_to_status_id,
-                          repost_status_id=self.repost_status_id)
-            # 上传文件也可以写成这样：
-            # rs=_file('photos/upload',
-            # status=(None,status,'text/plain'),
-            # photo=('photo',p,''application/octet-stream'')
-            photo.close()
-        else:
-            _, rs = _post('statuses/update', status=text,
-                          in_reply_to_user_id=self.in_reply_to_user_id,
-                          in_reply_to_status_id=self.in_reply_to_status_id,
-                          repost_status_id=self.repost_status_id)
-        if _:
-            # 用返回的结果补全自己
-            rs = self.populate(rs)
-        else:
-            _logger.error('Send faile, saved to draft box, you can send it later')
-            _cfg.draft_box.append(self)
-        return _, rs
+    @staticmethod
+    def process_photo_link(photo):
+        large_url = photo['largeurl']
+        origin_url = re.sub(r'@.+\..+$', '', large_url)
+        type = re.match(r'^.+\.(.+)$', origin_url).group(1)
+        photo['originurl'] = origin_url
+        photo['type'] = type
+        return photo
 
     def delete(self):
         """删除此消息（当前用户发出的消息）"""
-        _, rs = _post('statuses/destroy', id=self.id)
-        if _:
-            rs = self.populate(rs)
-        return _, rs
+        result = self.fan.post('statuses/destroy', id=self.id)
+        result = Status.from_json(self.fan, result)
+        return result
 
     @property
     def context(self):
         """按照时间先后顺序显示消息上下文"""
-        _, rv = _get('statuses/context_timeline', id=self.id)
-        if _:
-            rv = [Status.get(data=s) for s in rv]
-        return _, rv
+        result = self.fan.get('statuses/context_timeline', id=self.id)
+        context = [Status.from_json(self.fan, s) for s in result]
+        return context
 
-    def reply(self, response, photo=None):
+    def reply(self, response, photo=None, location=None, format='@{poster} {response}', **kwargs):
         """回复这条消息"""
-        response = '@{poster} {resp}'.format(resp=response, poster=self.user.screen_name)
-        status = Status(text=response, photo=photo, in_reply_to_user_id=self.user.id,
-                        in_reply_to_status_id=self.id)
-        rv = status.send()
-        return rv
+        text = format.format(response=response,
+                             poster=self.user.screen_name,
+                             **kwargs)
+        data = dict(status=text,
+                    photo=photo,
+                    location=location,
+                    in_reply_to_user_id=self.user.id,
+                    in_reply_to_status_id=self.id)
+        result = self.fan.update_status(**data)
+        return result
 
-    def repost(self, repost, photo=None):
+    def repost(self, repost, photo=None, location=None,
+               format='{repost}{repost_style_left}@{name} {origin}{repost_style_right}',
+               **kwargs):
         """转发这条消息"""
-        repost = '{repost}{repost_style_left}@{name} {origin}{repost_style_right}'.format(
-                repost=repost,
-                repost_style_left=_cfg.repost_style_left,
-                name=self.user.screen_name,
-                origin=self.text,
-                repost_style_right=_cfg.repost_style_right)
-        status = Status(text=repost, photo=photo, repost_status_id=self.id)
-        rv = status.send()
-        return rv
+        kwargs.setdefault('repost_style_left', ' ')
+        kwargs.setdefault('repost_style_right', '')
+
+        text = format.format(repost=repost,
+                             name=self.user.screen_name,
+                             origin=self.process_text(self.text),
+                             **kwargs)
+        data = dict(status=text,
+                    photo=photo,
+                    location=location,
+                    repost_status_id=self.id)
+        result = self.fan.update_status(**data)
+        return result
 
     def favorite(self):
         """收藏此消息"""
         # fuck, 为啥就这一个API不一样…
-        _, rs = _post('favorites/create/' + self.id)
-        if _:
-            rs = self.populate(rs)
-        return _, rs
+        result = self.fan.post('favorites/create/' + self.id)
+        return Status.from_json(self.fan, result)
 
     def unfavorite(self):
         """取消收藏此消息"""
-        _, rs = _post('favorites/destroy/' + self.id)
-        if _:
-            rs = self.populate(rs)
-        return _, rs
+        result = self.fan.post('favorites/destroy/' + self.id)
+        return Status.from_json(self.fan, result)
 
     def __str__(self):
         return '<Status ("{}" @{})>'.format(self.text, self.user.id)
 
     __repr__ = __str__
-
-
-class Config:
-    """
-    配置类
-    """
-    consumer_key = None  # required
-    consumer_secret = None  # required
-    auth_type = 'xauth'  # or 'oauth', or offer ``access_token``
-    save_token = True  # default True
-    save_path = os.path.abspath('van.cfg')
-    # or you can offer the ``access_token`` directly
-    access_token = None
-    xauth_username = None
-    xauth_password = None
-    auto_auth = True
-    redirect_url = 'http://localhost:8000/callback'
-    repost_style_left = ' '
-    repost_style_right = ''
-    # API related urls
-    request_token_url = 'http://fanfou.com/oauth/request_token'
-    authorize_url = 'http://fanfou.com/oauth/authorize'
-    access_token_url = 'http://fanfou.com/oauth/access_token'
-    draft_box = []  # type:[Status]
-    timeout = 5
-    max_sleep = 30
-
-    def __init__(self):
-        atexit.register(self.dump)
-        if self.access_token is not None \
-                and not isinstance(self.access_token, dict):
-            raise ValueError('access token should be a dict')
-        self.load()
-
-    def load(self):
-        if self.save_token and os.path.isfile(self.save_path):
-            with open(self.save_path, encoding='utf8') as f:
-                c = json.load(f)
-                c['draft_box'] = self.load_draft_box(c['draft_box'])
-                self.__dict__.update(c)
-
-    def dump(self):
-        if self.save_token:
-            attrs = ['consumer_key',
-                     'consumer_secret',
-                     'auth_type',
-                     'save_token',
-                     'save_path',
-                     'access_token',
-                     'xauth_username',
-                     'xauth_password',
-                     'auto_auth',
-                     'redirect_url',
-                     'request_token_url',
-                     'authorize_url',
-                     'access_token_url',
-                     'draft_box',
-                     'timeout',
-                     'max_sleep']
-            with open(self.save_path, 'w', encoding='utf8') as f:
-                config = {x: getattr(self, x) for x in attrs}
-                config['draft_box'] = self.save_draft_box()
-                json.dump(config, f)
-
-    def save_draft_box(self):
-        return base64.encodebytes(pickle.dumps(self.draft_box)).decode('latin-1')
-
-    def load_draft_box(self, b):
-        return pickle.loads(base64.decodebytes(b.encode('latin-1')))
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.dump()
-
-
-class Fan(User):
-    """
-    授权用户（可操作其数据）
-    """
-    cfg = None
-
-    def __init__(self, *, cfg, **kwargs):
-        """
-        :param Config cfg: Config 对象
-        """
-        # Fan as a user with access_token, could not offer id
-
-        self.mentions = Timeline(self, 'statuses/mentions')
-        """返回提到当前用户的20条消息"""
-        self.replies = Timeline(self, 'statuses/replies')
-        """返回当前用户收到的回复"""
-        self.public_timeline = Timeline(self, 'statuses/public_timeline')
-        """返回公共时间线"""
-
-        self.setup(cfg)
-
-        super(Fan, self).__init__(master=True)
-
-    @classmethod
-    def setup(cls, cfg):
-        """
-
-        :param Config cfg:
-        """
-        global _session, _cfg
-
-        cls.cfg = _cfg = cfg
-        _session = OAuth1Session(cfg.consumer_key, cfg.consumer_secret)
-        if not cfg.access_token or not cfg.access_token.get('oauth_token'):
-            if cfg.auth_type == 'oauth':
-                cfg.access_token = cls._oauth(cfg)
-            else:
-                cfg.access_token = cls._xauth(cfg)
-        _session._populate_attributes(cfg.access_token)
-
-    @staticmethod
-    def _oauth(cfg):
-        from http.server import BaseHTTPRequestHandler, HTTPServer
-
-        callback_request = None
-
-        class OAuthTokenHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                nonlocal callback_request
-                if 'callback?oauth_token=' in self.path:
-                    callback_request = self.path
-                    self.send_response(200)
-                    self.send_header('Content-type',
-                                     'text/html; charset=utf-8')
-                    self.end_headers()
-                    self.wfile.write("<h1>授权成功</h1>".encode('utf8'))
-                    self.wfile.write('<p>快去刷饭吧~</p>'.encode('utf8'))
-                else:
-                    self.send_response(403)
-                    self.send_header('Content-type',
-                                     'text/html; charset=utf-8')
-                    self.wfile.write('<h1>参数错误！</h1>'.encode('utf8'))
-                    raise AuthFailed
-
-        def start_oauth_server(redirect_uri):
-            nonlocal callback_request
-            netloc = urlparse(redirect_uri).netloc
-            hostname, port = netloc.split(':')
-            try:
-                port = int(port)
-            except TypeError:
-                port = 80
-            except ValueError:
-                print('[x] 不合法的回调地址: %s' % redirect_uri)
-                sys.exit(1)
-            httpd = HTTPServer((hostname, port), OAuthTokenHandler)
-            sa = httpd.socket.getsockname()
-            serve_message = "[-] 已在本地启动HTTP服务器，等待饭否君的到来"" \
-            "" (http://{host}:{port}/) ..."
-            print(serve_message.format(host=sa[0], port=sa[1]))
-            try:
-                httpd.handle_request()
-            except KeyboardInterrupt:
-                print("[-] 服务器退出中...", 'cyan')
-                raise AuthFailed
-            httpd.server_close()
-
-            if not callback_request:
-                print('[x] 服务器没有收到请求', 'red')
-                callback = get_input('[-] 请手动粘贴跳转后的链接>')
-                callback_request = callback
-
-        try:
-            _session.fetch_request_token(cfg.request_token_url)
-            authorization_url = _session.authorization_url(
-                    cfg.authorize_url,
-                    callback_uri=cfg.redirect_url)
-
-            print('[-] 初次使用，此工具需要你的授权才能工作/_\\', 'cyan')
-            if get_input('[-] 是否自动在浏览器中打开授权链接(y/n)>') == 'y':
-                import webbrowser
-                webbrowser.open_new_tab(authorization_url)
-            else:
-                print('[-] 请在浏览器中打开此链接: ', 'cyan')
-                print(authorization_url)
-
-            if cfg.auto_auth:
-                start_oauth_server(cfg.redirect_url)
-            else:
-                callback_request = get_input('[-] 请手动粘贴跳转后的链接>')
-
-            if callback_request:
-                try:
-                    _session.parse_authorization_response(
-                            cfg.redirect_url + callback_request)
-                    # requests-oauthlib换取access token时verifier是必须的，
-                    # 而饭否在上一步是不返回verifier的，所以必须手动设置
-                    access_token = _session.fetch_access_token(
-                            cfg.access_token_url, verifier='123')
-                except ValueError:
-                    raise AuthFailed
-                return access_token
-            else:
-                raise AuthFailed
-        except TokenRequestDenied:
-            raise AuthFailed('授权失败，请检查本地时间与网络时间是否同步')
-
-    @staticmethod
-    def _xauth(cfg):
-        from oauthlib.oauth1 import Client as OAuth1Client
-        from oauthlib.oauth1.rfc5849 import utils
-        import getpass
-        # patch utils.filter_params
-        utils.filter_oauth_params = lambda t: t
-
-        username = cfg.xauth_username or get_input('[-]请输入用户名或邮箱>')
-        password = cfg.xauth_password or getpass.getpass('[-]请输入密码>')
-        # 这些实际上并不是url params，但是他们与其他url params一样参与签名，
-        # 最终成为Authorization header的值
-        args = [
-            ('x_auth_username', username),
-            ('x_auth_password', password),
-            ('x_auth_mode', 'client_auth')
-        ]
-
-        class OAuth1ClientPatch(OAuth1Client):
-            """Patch oauthlib.oauth1.Client for xauth"""
-
-            def get_oauth_params(self, request):
-                params = super(OAuth1ClientPatch, self).get_oauth_params(request)
-                params.extend(args)
-                return params
-
-        sess = OAuth1Session(cfg.consumer_key, cfg.consumer_secret, client_class=OAuth1ClientPatch)
-        access_token = sess.fetch_access_token(cfg.access_token_url, verifier='123')
-        return access_token
-
-    def update_status(self, text, photo=None, in_reply_to_user_id=None,
-                      in_reply_to_status_id=None, repost_status_id=None):
-        """
-        发表新状态，:meth:`Status.send()` 的快捷方式。
-
-        :param str text: 文字
-        :param str photo: 照片路径或者URL
-        :param str in_reply_to_user_id: 要回复的用户ID
-        :param str in_reply_to_status_id: 要回复的消息ID
-        :param str repost_status_id: 要转发的消息ID
-        """
-        status = Status(text=text, photo=photo, in_reply_to_user_id=in_reply_to_user_id,
-                        in_reply_to_status_id=in_reply_to_status_id,
-                        repost_status_id=repost_status_id)
-        rs = status.send()
-
-        return rs
-
-    @property
-    def draft_box(self):
-        """
-        显示发送失败的消息列表
-
-        :rtype: [Status]
-        """
-        return _cfg.draft_box
-
-    # 以下是不需要 id 参数，即只能获取当前用户信息的API
-
-    def follow(self, user):
-        """
-        关注用户
-
-        :param User|str user: 被关注的用户, User对象，或id，或 loginname
-        """
-        if isinstance(user, User):
-            user = user.id
-        rs = _post('friendships/create', id=user)
-        return rs
-
-    def unfollow(self, user):
-        """
-        取消关注用户
-
-        :param User|str user: 被关注的用户, User对象，或id，或 loginname
-        """
-        if isinstance(user, User):
-            user = user.id
-        rs = _post('friendships/destroy', id=user)
-        return rs
-
-    @property
-    def follow_requests(self, count=60):
-        """
-        返回请求关注当前用户的列表
-
-        :rtype: (bool, [User])
-        """
-        for fo in self._pager('friendships/requests', count=count):
-            yield User.get(data=fo)
-
-    def accept_follower(self, user):
-        """
-        接受关注请求
-
-        :param User|str user: User对象，或id，或 loginname
-        :rtype: (bool, User)
-        """
-        if isinstance(user, User):
-            user = user.id
-        rv = _get('friendships/accept', id=user)
-        return rv
-
-    def deny_follower(self, user):
-        """
-        拒绝关注请求
-
-        :param User|str user: User对象，或id，或 loginname
-        :rtype: (bool, User)
-        """
-        if isinstance(user, User):
-            user = user.id
-        rv = _post('friendships/deny', id=user)
-        return rv
-
-    def block(self, user):
-        """
-        屏蔽用户
-
-        :param str|User user: 被屏蔽的用户User对象或者id，loginname
-        :rtype: (bool, User)
-        """
-        if isinstance(user, User):
-            user = user.id
-        rs = _post('blocks/create', id=user)
-        return rs
-
-    def unblock(self, user):
-        """
-        解除屏蔽
-
-        :param str|User user: 被屏蔽的用户User对象或者id，loginname
-        :rtype: (bool, str)
-        """
-        if isinstance(user, User):
-            user = user.id
-        rs = _post('blocks/destroy', id=user)
-        return rs
-
-    def is_blocked(self, user):
-        """
-        检查是否屏蔽用户
-
-        :param str|User user: 用户User对象或者id，loginname
-        :rtype: (bool, str)
-        """
-        if isinstance(user, User):
-            user = user.id
-        return _get('blocks/exists', id=user)
-
-    @property
-    def blocked_users(self):
-        """
-        返回黑名单上用户列表
-
-        :rtype: (bool, [User])
-        """
-        for bl in self._pager('blocks/blocking'):
-            yield User.get(data=bl)
-
-    @property
-    def blocked_users_id(self):
-        """
-        获取用户黑名单id列表
-
-        :rtype: (bool, [str])
-        """
-        for bl in self._pager('blocks/ids'):
-            yield bl
 
 
 class Event:
@@ -1005,18 +868,19 @@ class Event:
 
     ALL = MESSAGE | FRIENDS | FAV | USER | HEART_BEAT | ERROR
 
-    def __init__(self, type, data=None):
-        data = data if isinstance(data, dict) else dict(object=data)
+    def __init__(self, fan, type, data=None):
+        self.fan = fan
         self.type = type
+        data = data if isinstance(data, dict) else dict(object=data)
         source = data.get('source')
         target = data.get('target')
         object = data.get('object')
         event = data.get('event')
         created_at = data.get('created_at')
 
-        self.source = User.get(data=source) if isinstance(source, dict) else source
-        self.target = User.get(data=target) if isinstance(target, dict) else target
-        self.object = Status.get(data=object) if isinstance(object, dict) else object
+        self.source = User.from_json(fan, source) if isinstance(source, dict) else source
+        self.target = User.from_json(fan, target) if isinstance(target, dict) else target
+        self.object = User.from_json(fan, object) if isinstance(object, dict) else object
         self.event = event
         self.created_at = arrow.get(created_at, 'ddd, DD MMM YYYY HH:mm:ss') if created_at else created_at
 
@@ -1031,16 +895,14 @@ class Listener:
         self.ttl = ttl
 
 
-_EVENT_HEART_BEAT = Event(Event.HEART_BEAT, r'\r\n')
-
-
 class Stream(threading.Thread):
     """
     Streamming API, 实时监测用户动作
     """
 
-    def __init__(self):
+    def __init__(self, fan):
         super().__init__()
+        self.fan = fan
         self._conn = None
         self._listeners = []  # type:[Listener]
         self._lock = threading.RLock()
@@ -1052,7 +914,7 @@ class Stream(threading.Thread):
         """
         开始建立长连接
         """
-        self._conn = _session.post('http://stream.fanfou.com/1/user.json', stream=True)
+        self._conn = self.fan.session.post('http://stream.fanfou.com/1/user.json', stream=True)
         if self._conn.encoding is None:
             self._conn.encoding = 'utf8'
 
@@ -1072,7 +934,7 @@ class Stream(threading.Thread):
                 try:
                     action(evt)
                 except Exception as e:
-                    _logger.error(e)
+                    logger.error(e)
             if not self._running:
                 break
         self._conn.close()
@@ -1090,21 +952,20 @@ class Stream(threading.Thread):
                     if lsn.ttl is not None:
                         lsn.ttl -= 1
 
-    @staticmethod
-    def _parse_chunk(chunk):
+    def _parse_chunk(self, chunk):
         if chunk == '\r\n':
-            return _EVENT_HEART_BEAT
+            return Event(self.fan, Event.HEART_BEAT, r'\r\n')
 
         try:
             data = json.loads(chunk)
         except json.JSONDecodeError as e:
-            _logger.error(e)
+            logger.error(e)
             return Event(Event.ERROR, e)
 
         event_name = data['event'].upper().replace('.', '_')
         type = getattr(Event, event_name, Event.ERROR)
 
-        event = Event(type, data)
+        event = Event(self.fan, type, data)
         return event
 
     def install_listener(self, listener):

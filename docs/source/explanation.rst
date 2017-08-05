@@ -4,31 +4,7 @@ Explanation
 总体设计
 ---------
 
-van 的所有功能分布在五个类中, :class:`~van.Fan`、 :class:`~van.Config`、 :class:`~van.User`、 :class:`~van.Status` 和 :class:`~van.Timeline`.
-
-van 的所有 API 调用均返回一个二元组 (bool, value)。
-第一个元素如果为 `True`, 则表示调用成功，那么第二个元素为调用的结果；
-如果第一个元素为 `False`，表示调用失败，那么第二个元素表示失败的原因。
-所以，调用 API 之后一定要先判断第一个元素，再决定是否使用第二个元素。通常的使用方式为::
-
-    _, rv = me.follow(user)
-    if _:
-        # 使用 rv 做一些事
-
-另外，van 为了节省内存和避免重复创建相同对象，在基类 :class:`~van.Base` 中提供了对象缓存功能。
-
-为了使用缓存功能，在创建 :class:`~van.User`, :class:`~van.Fan`, 和 :class:`~van.Status` 对象时，需要使用 :meth:`~van.Base.get()` 方法，而不是构造函数::
-
-    me = Fan.get(cfg=cfg)
-    user = User.get(id='abcd')
-    status = Status.get(data=data)
-
-但是，在构造一个不完全对象时 (即，只手动填充了部分属性)，可以使用构造函数。比如在创建一个即将被发送的 :class:`~van.Status` 对象时，需要手动为其填充部分属性::
-
-    status = Status(text="hello", in_reply_to_user_id='abc')
-    status.send()
-
-在调用 :meth:`~van.Status.send()` 之后，该对象的属性会被服务器返回的数据填充完整。
+van 的所有功能分布在四个类中, :class:`~van.Fan`、 :class:`~van.User`、 :class:`~van.Status` 和 :class:`~van.Timeline`.
 
 
 User - 猜猜我是谁？
@@ -50,10 +26,10 @@ relationship()      返回此用户与 other 的关系
 Fan - 我才是老大！
 --------------------
 
-`Fan` 是 `User` 的子类，所以它有 `User` 的所有属性和操作，但它还有一些需要授权才能进行的操作，比如更新状态 :meth:`Fan.update_status`、关注好友 :meth:`Fan.follow` 等。
-它也是整个程序的开始点和其他API访问的入口点。程序需要先实例化一个 `Fan` 对象，并为其提供一个 `Config` 对象，然后通过 `Fan` 对象访问其他 API。
+`Fan` 是整个程序的开始点和其他API访问的入口点。程序需要先实例化一个 `Fan` 对象，然后通过 `Fan` 对象访问其他 API。
 
 ================== =================================
+me                 获取授权用户的信息
 draft_box          显示发送失败的消息列表
 mentions           返回提到当前用户的20条消息
 replies            返回当前用户收到的回复
@@ -69,28 +45,6 @@ block()            屏蔽用户
 unblock()          解除屏蔽
 is_blocked()       检查是否屏蔽用户
 ================== =================================
-
-Config - 我该怎么做？
------------------------
-
-:class:`~van.Config` 顾名思义，是用来控制程序行为的类。van 提供的 Config 定义了一组默认配置，其中只有 `consumer_key` 和 `consumer_secret` 是必须提供的，
-其他的配置都可以使用默认值。
-
-================  =========================================
-consumer_key      申请应用后获取
-consumer_secret   申请应用后获取
-auth_type         授权类型。默认为 xauth, 需要提供 xauth_username 和 xauth_password， 即用户名和密码。
-
-                  可选为 oauth, 这种不要用户名和密码，比较安全，但是一些手动操作，无法自动完成。
-
-                  推荐在不方便手动操作的场景使用 xauth, 在一般场合使用 oauth。
-save_token        van 获取 Access Token 之后是否保存在文件中，下次启动无需重新授权。保存路径由 save_path 指定。
-save_path         Access Token 及其他配置文件的保存路径，默认为当前路径。
-access_token      如果你已经获取了 Access Token，则可以直接填写，可以省略其他授权过程。
-xauth_username    auth_type 为 xauth 时填写
-xauth_password    auth_type 为 xauth 时填写
-auto_auth         auth_type 为 oauth 时是否在本地启动服务器自动验证，否则需要手动粘贴授权后跳转的链接。默认为 True。
-================  =========================================
 
 Status - 我的实例最多~
 -------------------------
@@ -135,13 +89,3 @@ rewind()      获取最新的状态插入到时间线的头部，并将指针置
 seek()        移动游标的位置
 read()        从当前游标位置处往后读取消息
 ============= ========================
-
-Base - 背后的大佬
-----------------------
-
-`Base` 是 `User`、`Fan` 和 `Status` 的基类，主要提供两个功能：
-
-1. 对象缓存，ID 相同的对象只会创建一次
-2. 自动请求 API 填充对象
-
-为了使用对象缓存功能，创建 `User`、`Fan` 和 `Status` 实例都需要使用其 `get()` 方法，而不是直接调用构造函数，这一点需要注意。

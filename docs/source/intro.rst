@@ -12,18 +12,21 @@ Quick Start Demo
 
 .. code-block:: python
 
-    from van import Fan, Config
+    from van import Fan
 
-    # 1. 继承 Config 类，并提供你的配置
-    class MyConfig(Config):
-        consumer_key = 'xxxx'
-        consumer_secret = 'xxxx'
+    # 实例化 Fan 类
+    fan = Fan(consumer_key, consumer_secret)
 
-    # 2. 实例化 Fan 对象
-    me = Fan.get(cfg=MyConfig())
+    # 使用 xauth 授权方式
+    fan.xauth(username,password)
 
-    # 3. 调用 me 的方法
-    me.update_status('你好啊，李银河！')
+    # 或者使用 oauth 授权方式
+    # url = fan.authorization_url()
+    # 访问此 url 并复制 PIN 码 （或重定向后的 URL）
+    # fan.oauth(pin_code)
+
+    # 调用 API
+    fan.update_status('你好啊，李银河！')
 
 
 Installation
@@ -53,7 +56,7 @@ van 只支持 Python3, 请前往官网下载安装 Python 3.5 以上版本。
 要使用 van 你还需要在饭否中申请一个应用：
 
 #. 在 http://fanfou.com/apps 中创建新应用
-#. 应用名称、主页、描述等信息可以随意填写，如果你想使用 van 的自动 OAuth 认证功能，需要将 `Callback URL` 填写为 http://localhost:8000/callback
+#. 应用名称、主页、描述等信息可以随意填写
 #. 记录下 `Consumer Key` 和 `Consumer Secret`
 
 
