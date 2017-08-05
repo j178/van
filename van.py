@@ -3,13 +3,10 @@
 
 from __future__ import print_function, unicode_literals, absolute_import
 
-import atexit
-import base64
 import functools
 import json
 import logging
 import os
-import pickle
 import re
 import threading
 from urllib.parse import urlparse
@@ -18,7 +15,7 @@ import arrow
 import requests
 from requests_oauthlib.oauth1_session import OAuth1Session
 
-__version__ = '0.0.4'
+__version__ = '0.0.5'
 __all__ = ['Fan', 'User', 'Status', 'Timeline']
 logger = logging.getLogger(__name__)
 
@@ -686,12 +683,16 @@ class User(Base):
 
 class Photo:
     def __init__(self, photo_url):
-        self.photo_url = photo_url
-        self.url = self.get(photo_url)
+        self.default_url = photo_url
+        _, self.origin_url = self.parse(photo_url)
 
     @staticmethod
     def encode_params(params):
         pass
+
+    @staticmethod
+    def parse(url):
+        return {}, url
 
     def get(self, width=None, height=None, edge=None,
             larger=None, percentage=None, background_color=None):
@@ -716,6 +717,9 @@ class Photo:
             'bgc': background_color
         }
         return self.encode_params(params)
+
+    def __str__(self):
+        return self.default_url
 
 
 class Status(Base):

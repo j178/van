@@ -12,7 +12,7 @@ try:
     from fanfou_sdk.van import Fan, Status, User, Stream, Event
 except ImportError:
     import van
-    from van import Fan, Config, Status, User, Photo, Stream, Event
+    from van import Fan, Status, User, Stream, Event
 
 CONSUMER_KEY = 'b55d535f350dcc59c3f10e9cf43c1749'
 CONSUMER_SECRET = 'e9d72893b188b6340ad35f15b6aa7837'

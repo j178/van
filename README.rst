@@ -66,7 +66,7 @@ van 只支持 Python3, 请前往官网下载安装 Python 3.5 以上版本。
 要使用 van 你还需要在饭否中申请一个应用：
 
 #. 在 http://fanfou.com/apps 中创建新应用
-#. 应用名称、主页、描述等信息可以随意填写，如果你想使用 van 的自动 OAuth 认证功能，需要将 `Callback URL` 填写为 http://localhost:8000/callback
+#. 应用名称、主页、描述等信息可以随意填写
 #. 记录下 `Consumer Key` 和 `Consumer Secret`
 
 
