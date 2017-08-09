@@ -3,6 +3,7 @@ language: python
 python:
   - 3.5
   - 3.6
+  - nightly
 
 notifications:
   email:
@@ -11,6 +12,8 @@ notifications:
     on_success: change
     on_failure: always
 
+  slack: damn1t:B8uaJpZSMh7R7rOkr8q9snjw
+
   webhooks:
     urls:
       - https://webhooks.gitter.im/e/a69c3fc977374d4773ff
@@ -18,12 +21,6 @@ notifications:
     on_failure: always  # options: [always|never|change] default: always
     on_start: never     # options: [always|never|change] default: always
 
-before_install:
-  - sudo apt-get update
-  - sudo apt-get -y install python-pip
-  - sudo pip install --upgrade pip
-  - pip install --upgrade pip
-  - pip install -r requirements-dev.txt
-  - export TEST=true
+
 script:
   - nosetests test.py

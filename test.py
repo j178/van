@@ -118,17 +118,17 @@ class TestTimeline:
         self.tl.read(10)
         assert_equal(self.tl.tell(), 20)
 
-        ori_ptr = self.tl.tell()
+        # ori_ptr = self.tl.tell()
         # r = self.tl.read(1 << 32)
         # assert_equal(self.tl.tell(), ori_ptr + len(r))
 
         # r = self.tl.read()
         # assert_equal(len(r), 0)
 
-        # self.me.statues.read()
-        # self.fan.replies.read()
-        # self.fan.mentions.read()
-        # self.fan.public_timeline.read()
+        self.me.statues.read()
+        self.fan.replies.read()
+        self.fan.mentions.read()
+        self.fan.public_timeline.read()
 
     def test_call(self):
         tl = self.tl

@@ -107,6 +107,7 @@ class Fan:
         self._session = OAuth1Session(consumer_key, consumer_secret)
         if oauth_token:
             self._session._populate_attributes(oauth_token)
+        self._request_token = None
         self._oauth_type = None
 
         self.request_token_url = 'http://fanfou.com/oauth/request_token'
@@ -132,7 +133,8 @@ class Fan:
         当 oauth_callback = 'oob' 时表示使用 PIN码授权
         """
         self._oauth_type = oauth_callback
-        self._session.fetch_request_token(self.request_token_url)
+        token = self._session.fetch_request_token(self.request_token_url)
+        self._request_token = token
         url = self._session.authorization_url(self.authorize_url, oauth_callback=oauth_callback)
         return url
 
@@ -677,22 +679,43 @@ class User(Base):
 
 
 class Photo:
+    """https://www.mtyun.com/doc/api/mss/mss/tu-pian-chu-li-fu-wu-api#图片处理服务状态码"""
+
     def __init__(self, photo_url):
         self.default_url = photo_url
-        _, self.origin_url = self.parse(photo_url)
+        self.origin_url = self.parse(photo_url)[0]
+        self._params = {}
+        self._format = ''
 
-    @staticmethod
-    def encode_params(params):
-        pass
+    @property
+    def url(self):
+        params = {}
+        for key, param in self._params.items():
+            if isinstance(param, (tuple, list)):
+                param = '-'.join(param)
+            params[key] = param
+        s = '_'.join('{}{}'.format(v, k) for k, v in params.items() if v is not None)
+
+        format = self._format
+        if format and not format.startswith('.'):
+            format = '.' + format
+        return '{}@{}{}'.format(self.origin_url, s, format)
 
     @staticmethod
     def parse(url):
-        return {}, url
+        url, params = url.rsplit('@', 1)
+        return url, params
 
-    def get(self, width=None, height=None, edge=None,
-            larger=None, percentage=None, background_color=None):
+    @staticmethod
+    def check_length(v, name, length):
+        if isinstance(v, (list, tuple)):
+            if len(v) != length:
+                raise ValueError('{} should have length of {}'.format(name, length))
+
+    def resize(self, width=None, height=None, edge=None,
+               larger=None, percentage=None, background_color=None):
         """
-        图片处理服务
+        图片缩放
         :param width: 1-4096 指定目标缩略图的宽度
         :param height: 1-4096 指定目标缩略图的高度
         :param edge: 0/1/2/4，默认值为0 缩略优先边。0代表长边优先；1代表短边优先；2代表强制缩略；4代表短边优先缩略后填充
@@ -701,8 +724,8 @@ class Photo:
         :param background_color: red, green, blue[0-255] 填充部分的背景色。默认不指定（白色填充）。例如：100-100-100bgc
         :return: 图片URL
         """
-        if isinstance(background_color, (list, tuple)):
-            pass
+        self.check_length(background_color, 'background_color', 3)
+
         params = {
             'w': width,
             'h': height,
@@ -711,7 +734,46 @@ class Photo:
             'p': percentage,
             'bgc': background_color
         }
-        return self.encode_params(params)
+        self._params.update(params)
+
+    def crop(self, cut=None, advanced_cut=None, region_cut=None):
+        self.check_length(advanced_cut, 'advanced_cut', 4)
+        self.check_length(region_cut, 'region_cut', 3)
+
+        """图片裁剪"""
+        params = {
+            'c': cut,
+            'a': advanced_cut,
+            'rc': '{0}x{1}-{2}'.format(*region_cut)
+        }
+
+        self._params.update(params)
+
+    def rotate(self, rotate):
+        params = {'r': rotate}
+        self._params.update(params)
+
+    def orient(self, orient):
+        params = {'o': orient}
+        self._params.update(params)
+
+    def quality(self, quality, relative=True):
+        code = 'q'
+        if not relative:
+            code = 'Q'
+        params = {code: quality}
+        self._params.update(params)
+
+    def change_format(self, format):
+        self._format = format
+
+    @property
+    def exif(self):
+        return
+
+    @property
+    def infoexif(self):
+        return
 
     def __str__(self):
         return self.default_url

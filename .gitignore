@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .vscode/
+thoughts.txt
 # C extensions
 *.so
 
